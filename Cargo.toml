@@ -1,0 +1,29 @@
+[package]
+name = "tmux-web"
+version = "0.1.0"
+edition = "2021"
+license = "ISC"
+description = "A small web gateway for remotely accessing tmux sessions."
+
+[profile.release]
+opt-level = "z"    # s: 优化目标：考虑速度的同时优化大小, z: 最小体积
+lto = true         # "fat": 启用最激进的链接时优化
+codegen-units = 1  # 减少代码生成单元数量，提高优化效果
+panic = "abort"    # 使用"abort"而非"unwind"处理恐慌
+strip = true
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8.4", features = ["ws", "json"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = "0.3"
+portable-pty = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.40", features = ["macros", "net", "process", "rt-multi-thread", "sync"] }
+tower-http = { version = "0.6.4", features = ["fs"] }
+uuid = { version = "1.4", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3.10"
