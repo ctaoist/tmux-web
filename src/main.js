@@ -31,6 +31,14 @@ const state = {
 
 const app = document.querySelector("#app");
 const TMUX_PREFIX = "\x02";
+const BROWSER_CONTEXT_MENU_EVENTS = [
+  "contextmenu",
+  "mousedown",
+  "mouseup",
+  "auxclick",
+  "pointerdown",
+  "pointerup",
+];
 const TERMINAL_THEMES = {
   dark: {
     background: "#101214",
@@ -1302,6 +1310,17 @@ function handleGlobalKeyEvent(event) {
   handleCommandKey(event);
 }
 
+function suppressBrowserContextMenu(event) {
+  if (event.type !== "contextmenu" && !isSecondaryMouseButtonEvent(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+}
+
+function isSecondaryMouseButtonEvent(event) {
+  return event.button === 2 || (event.buttons & 2) === 2;
+}
+
 function isEditableTarget(target) {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName.toLowerCase();
@@ -1441,6 +1460,9 @@ syncViewportSize();
 window.addEventListener("resize", syncViewportSize);
 window.visualViewport?.addEventListener("resize", syncViewportSize);
 window.visualViewport?.addEventListener("scroll", syncViewportSize);
+BROWSER_CONTEXT_MENU_EVENTS.forEach((eventType) => {
+  window.addEventListener(eventType, suppressBrowserContextMenu, { capture: true, passive: false });
+});
 window.addEventListener("keydown", handleGlobalKeyEvent, true);
 
 bootstrap().catch((error) => {
