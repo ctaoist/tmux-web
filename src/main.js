@@ -1178,7 +1178,7 @@ function appendClippedBufferLine(rows, buffer, row, startCol, endCol, forceNewRo
 
 function joinCopiedRows(rows) {
   if (!rows.length) return "";
-  return rows.join(isWindowsLike() ? "\r\n" : "\n");
+  return rows.map((row) => row.trimEnd()).join(isWindowsLike() ? "\r\n" : "\n");
 }
 
 function writeClipboardText(text) {
