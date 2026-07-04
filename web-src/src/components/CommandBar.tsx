@@ -35,7 +35,7 @@ export default function CommandBar(props) {
                 else props.actions.runTopLevelCommand(item.action);
               }}
             >
-              <kbd>{item.key}</kbd>
+              {item.key ? <kbd>{item.key}</kbd> : null}
               <span>{item.label}</span>
             </button>
           )}

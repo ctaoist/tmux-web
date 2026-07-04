@@ -762,6 +762,121 @@ kbd {
   font-size: 13px;
 }
 
+.pane-list-panel {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(480px, calc(var(--viewport-height) - 120px));
+  overflow: auto;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--command-item-hover-border);
+  border-radius: 8px;
+  background: var(--modal-bg);
+  box-shadow: 0 18px 80px var(--shadow);
+  padding: 12px;
+  z-index: 45;
+}
+
+.pane-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.pane-list-title {
+  color: var(--cyan);
+  font-weight: 700;
+}
+
+.pane-list-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.pane-list-refresh,
+.pane-list-close {
+  min-width: 32px;
+  height: 30px;
+  border: 1px solid var(--command-item-border);
+  border-radius: 4px;
+  background: var(--command-item-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pane-list-refresh:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.pane-list-refresh:not(:disabled):hover,
+.pane-list-close:hover {
+  border-color: var(--command-item-hover-border);
+  background: var(--command-item-hover-bg);
+}
+
+.pane-list-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.pane-list-item {
+  display: grid;
+  grid-template-columns: minmax(4ch, auto) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  border: 1px solid var(--command-item-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--command-item-bg);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pane-list-item:hover {
+  border-color: var(--command-item-hover-border);
+  background: var(--command-item-hover-bg);
+}
+
+.pane-list-item.active {
+  border-color: var(--command-item-active-border);
+  background: var(--command-item-active-bg);
+  color: var(--cyan);
+}
+
+.pane-list-id {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-list-size,
+.pane-list-position {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pane-list-item.active .pane-list-size,
+.pane-list-item.active .pane-list-position {
+  color: var(--cyan);
+}
+
+.pane-list-empty {
+  display: grid;
+  min-height: 44px;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 @media (max-width: 680px) {
   .workspace {
     grid-template-rows: var(--mobile-nav-height) minmax(0, 1fr) 0;
@@ -947,6 +1062,46 @@ kbd {
       max(14px, var(--safe-area-right))
       max(14px, var(--safe-area-bottom))
       max(14px, var(--safe-area-left));
+  }
+
+  .pane-list-panel {
+    left: 0;
+    right: 0;
+    top: auto;
+    bottom: calc(var(--mobile-command-bar-height) + var(--safe-area-bottom));
+    width: auto;
+    max-height: min(
+      420px,
+      calc(
+        var(--viewport-height)
+        - var(--mobile-nav-height)
+        - var(--mobile-command-bar-height)
+        - var(--safe-area-top)
+        - var(--safe-area-bottom)
+        - 16px
+      )
+    );
+    transform: none;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 10px 10px 0 0;
+    padding:
+      12px
+      max(12px, var(--safe-area-right))
+      12px
+      max(12px, var(--safe-area-left));
+  }
+
+  .pane-list-refresh,
+  .pane-list-close {
+    min-width: 44px;
+    height: 36px;
+  }
+
+  .pane-list-item {
+    grid-template-columns: minmax(4ch, 1fr) auto auto;
+    min-height: 52px;
   }
 
   .submenu-grid {

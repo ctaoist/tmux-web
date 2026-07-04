@@ -174,9 +174,46 @@ impl TmuxConfig {
         Ok(sessions)
     }
 
-    pub async fn list_panes(&self, session_name: &str) -> Result<Vec<TmuxPane>> {
-        validate_session_name(session_name)?;
-        self.list_panes_for_target(session_name).await
+    pub async fn list_panes_for_window(
+        &self,
+        session_name: &str,
+        window_id: &str,
+    ) -> Result<Vec<TmuxPane>> {
+        let entry = self
+            .window_entry_in_session(session_name, window_id)
+            .await?;
+        self.list_panes_for_target(&entry.window.id).await
+    }
+
+    pub async fn select_pane_in_window(
+        &self,
+        session_name: &str,
+        window_id: &str,
+        pane_id: &str,
+    ) -> Result<TmuxPane> {
+        validate_pane_id(pane_id)?;
+        let panes = self.list_panes_for_window(session_name, window_id).await?;
+        if !panes.iter().any(|pane| pane.id == pane_id) {
+            return Err(anyhow!(
+                "tmux pane {pane_id} was not found in window {window_id}"
+            ));
+        }
+
+        let output = self
+            .command()
+            .arg("select-pane")
+            .arg("-t")
+            .arg(pane_id)
+            .output()
+            .await
+            .context("failed to execute tmux select-pane")?;
+        ensure_success(output.status.success(), &output.stderr, "tmux select-pane")?;
+
+        self.list_panes_for_window(session_name, window_id)
+            .await?
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .ok_or_else(|| anyhow!("pane was selected but not found in tmux list-panes"))
     }
 
     pub async fn list_windows(&self, session_name: &str) -> Result<Vec<TmuxWindow>> {
@@ -668,6 +705,19 @@ fn validate_window_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_pane_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 32 {
+        return Err(anyhow!("pane id must be 1-32 characters"));
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '%' | '-' | '_' | '.'))
+    {
+        return Err(anyhow!("pane id contains unsupported characters"));
+    }
+    Ok(())
+}
+
 fn generated_session_name() -> String {
     let suffix: String = Uuid::new_v4()
         .simple()
@@ -892,6 +942,15 @@ mod tests {
         assert_eq!(pane.width, 79);
         assert_eq!(pane.height, 24);
         assert!(pane.active);
+    }
+
+    #[test]
+    fn validates_safe_pane_ids() {
+        assert!(validate_pane_id("%1").is_ok());
+        assert!(validate_pane_id("%123").is_ok());
+        assert!(validate_pane_id("").is_err());
+        assert!(validate_pane_id("%1:bad").is_err());
+        assert!(validate_pane_id("bad pane").is_err());
     }
 
     #[test]

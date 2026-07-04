@@ -81,6 +81,47 @@ export function createActions({ state, setState, getTerminal }) {
     return windows;
   }
 
+  async function refreshPaneList(sessionName = state.activeSession, windowId = state.activeWindowId) {
+    if (!sessionName || !windowId) {
+      setState({ paneListPanes: [], paneListLoading: false });
+      return [];
+    }
+
+    setState({ paneListLoading: true });
+    try {
+      const data = await authorizedApi(
+        `/api/sessions/${encodeURIComponent(sessionName)}/windows/${encodeURIComponent(windowId)}/panes`,
+      );
+      const panes = Array.isArray(data.panes) ? data.panes : [];
+      setState({ paneListPanes: panes, paneListLoading: false });
+      return panes;
+    } catch (error) {
+      setState({ paneListLoading: false });
+      throw error;
+    }
+  }
+
+  function openPaneList() {
+    setState({ paneListVisible: true, activeMenu: null, mode: "locked" });
+    void refreshPaneList().catch(() => {});
+  }
+
+  function closePaneList() {
+    setState({ paneListVisible: false });
+    getTerminal()?.focus();
+  }
+
+  async function selectPane(paneId) {
+    if (!state.activeSession || !state.activeWindowId || !paneId) return;
+    await authorizedApi(
+      `/api/sessions/${encodeURIComponent(state.activeSession)}/windows/${encodeURIComponent(state.activeWindowId)}/panes/${encodeURIComponent(paneId)}`,
+      { method: "PUT" },
+    );
+    setState({ paneListVisible: false });
+    getTerminal()?.schedulePaneLayoutRefresh(90);
+    getTerminal()?.focus();
+  }
+
   async function createSession() {
     const name = window.prompt("Session name", `web-${Math.random().toString(16).slice(2, 8)}`);
     if (name === null) return null;
@@ -271,6 +312,7 @@ export function createActions({ state, setState, getTerminal }) {
     if (key === "?") return openCommandMenu("help");
 
     const action = COMMAND_MENUS[state.activeMenu]?.actions.find((item) => {
+      if (!item.key) return false;
       if (item.key === "Space") return key === " ";
       return item.key.toLowerCase() === lowered || item.key === key;
     });
@@ -286,8 +328,7 @@ export function createActions({ state, setState, getTerminal }) {
       lockCommandMode();
     }
     if (action === "pane-list") {
-      sendTmuxPrefixKey("q");
-      lockCommandMode();
+      openPaneList();
     }
   }
 
@@ -295,6 +336,7 @@ export function createActions({ state, setState, getTerminal }) {
     setState({
       mode: state.mode === "locked" ? "unlocked" : "locked",
       activeMenu: null,
+      paneListVisible: false,
     });
     getTerminal()?.focus();
   }
@@ -305,7 +347,7 @@ export function createActions({ state, setState, getTerminal }) {
   }
 
   function openCommandMenu(menu) {
-    setState("activeMenu", menu);
+    setState({ activeMenu: menu, paneListVisible: false });
     getTerminal()?.focus();
   }
 
@@ -373,6 +415,7 @@ export function createActions({ state, setState, getTerminal }) {
     applyTheme,
     bootstrap,
     closeCommandMenu,
+    closePaneList,
     createSession,
     createWindow,
     executeMenuAction,
@@ -384,9 +427,12 @@ export function createActions({ state, setState, getTerminal }) {
     killWindow,
     login,
     openCommandMenu,
+    openPaneList,
+    refreshPaneList,
     refreshSessions,
     refreshWindows,
     runTopLevelCommand,
+    selectPane,
     setActiveSession,
     setActiveWindow,
     toggleStickyKeys,

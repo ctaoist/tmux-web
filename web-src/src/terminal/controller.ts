@@ -611,9 +611,13 @@ export function createTerminalController({
   }
 
   async function refreshPaneLayout(sessionName = state.activeSession) {
-    if (!sessionName) return [];
+    if (!sessionName || sessionName !== state.activeSession || !state.activeWindowId) return [];
     try {
-      const data = await api(`/api/sessions/${encodeURIComponent(sessionName)}/panes`, {}, onAuthExpired);
+      const data = await api(
+        `/api/sessions/${encodeURIComponent(sessionName)}/windows/${encodeURIComponent(state.activeWindowId)}/panes`,
+        {},
+        onAuthExpired,
+      );
       const panes = Array.isArray(data.panes) ? data.panes : [];
       runtime.panesBySession.set(sessionName, panes);
       return panes;

@@ -143,6 +143,11 @@ struct PanesResponse {
 }
 
 #[derive(Serialize)]
+struct PaneResponse {
+    pane: TmuxPane,
+}
+
+#[derive(Serialize)]
 struct ZoomResponse {
     zoomed: bool,
 }
@@ -193,7 +198,14 @@ async fn main() -> Result<()> {
             "/api/sessions/{name}/windows/{window_id}",
             put(select_window).delete(kill_window),
         )
-        .route("/api/sessions/{name}/panes", get(list_panes))
+        .route(
+            "/api/sessions/{name}/windows/{window_id}/panes",
+            get(list_window_panes),
+        )
+        .route(
+            "/api/sessions/{name}/windows/{window_id}/panes/{pane_id}",
+            put(select_window_pane),
+        )
         .route("/api/sessions/{name}/zoom", get(get_zoom).post(set_zoom))
         .route("/api/sessions/{name}/zoom/auto", delete(clear_auto_zoom))
         .route(
@@ -330,17 +342,31 @@ async fn create_session(
         .map_err(bad_request)
 }
 
-async fn list_panes(
+async fn list_window_panes(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Path(name): Path<String>,
+    Path((name, window_id)): Path<(String, String)>,
 ) -> ApiResult<PanesResponse> {
     require_auth(&headers, &state)?;
     state
         .tmux
-        .list_panes(&name)
+        .list_panes_for_window(&name, &window_id)
         .await
         .map(|panes| Json(PanesResponse { panes }))
+        .map_err(bad_request)
+}
+
+async fn select_window_pane(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((name, window_id, pane_id)): Path<(String, String, String)>,
+) -> ApiResult<PaneResponse> {
+    require_auth(&headers, &state)?;
+    state
+        .tmux
+        .select_pane_in_window(&name, &window_id, &pane_id)
+        .await
+        .map(|pane| Json(PaneResponse { pane }))
         .map_err(bad_request)
 }
 

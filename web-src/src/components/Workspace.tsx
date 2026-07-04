@@ -1,5 +1,6 @@
 import CommandBar from "./CommandBar";
 import CommandPanel from "./CommandPanel";
+import PaneListOverlay from "./PaneListOverlay";
 import StickyKeys from "./StickyKeys";
 import TabBar from "./TabBar";
 import TerminalStage from "./TerminalStage";
@@ -25,6 +26,7 @@ export default function Workspace(props) {
         terminal={props.terminal}
       />
       <CommandBar state={props.state} actions={props.actions} />
+      <PaneListOverlay state={props.state} actions={props.actions} />
       <CommandPanel state={props.state} actions={props.actions} />
     </main>
   );
