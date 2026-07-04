@@ -114,9 +114,11 @@ export function createActions({ state, setState, getTerminal }) {
 
   async function selectPane(paneId) {
     if (!state.activeSession || !state.activeWindowId || !paneId) return;
-    await getTerminal()?.selectWindowPane(state.activeWindowId, paneId, state.activeSession);
+    const terminal = getTerminal();
+    await terminal?.selectWindowPane(state.activeWindowId, paneId, state.activeSession);
+    await terminal?.zoomActivePaneForMobile(state.activeSession);
     setState({ paneListVisible: false });
-    getTerminal()?.focus();
+    terminal?.focus();
   }
 
   async function createSession() {

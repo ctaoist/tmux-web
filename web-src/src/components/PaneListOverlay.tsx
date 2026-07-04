@@ -1,12 +1,7 @@
-import { createMemo, For, Show } from "solid-js";
+import { For, Show } from "solid-js";
 
 export default function PaneListOverlay(props) {
-  const panes = createMemo(() => (
-    [...(props.state.paneListPanes || [])].sort((left, right) => {
-      if (left.active !== right.active) return left.active ? -1 : 1;
-      return left.id.localeCompare(right.id, undefined, { numeric: true });
-    })
-  ));
+  const panes = () => props.state.paneListPanes || [];
 
   return (
     <Show when={props.state.paneListVisible}>

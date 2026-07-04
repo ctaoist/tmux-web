@@ -488,6 +488,10 @@ button {
   padding: 0 10px;
 }
 
+.command-item.mobile-only-command {
+  display: none;
+}
+
 .sticky-toggle {
   display: inline-flex;
   align-items: center;
@@ -1011,6 +1015,10 @@ kbd {
   .command-item {
     min-height: 38px;
     padding: 0 10px;
+  }
+
+  .command-item.mobile-only-command {
+    display: flex;
   }
 
   .sticky-keys {

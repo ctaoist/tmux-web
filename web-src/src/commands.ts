@@ -5,11 +5,12 @@ export type CommandItem = {
   label: string;
   action?: string;
   menu?: string;
+  mobileOnly?: boolean;
 };
 
 export const LOCKED_COMMAND_ITEMS: CommandItem[] = [
   { key: "Ctrl+g", label: "Unlock", action: "toggle-mode" },
-  { label: "Panes", action: "pane-list" },
+  { label: "Panes", action: "pane-list", mobileOnly: true },
 ];
 
 export const UNLOCKED_COMMAND_ITEMS: CommandItem[] = [
@@ -17,7 +18,7 @@ export const UNLOCKED_COMMAND_ITEMS: CommandItem[] = [
   { key: "s", label: "Session", menu: "session" },
   { key: "p", label: "Pane", menu: "pane" },
   { key: "w", label: "Window", menu: "window" },
-  { label: "Panes", action: "pane-list" },
+  { label: "Panes", action: "pane-list", mobileOnly: true },
   { key: "?", label: "Help", menu: "help" },
 ];
 

@@ -29,7 +29,10 @@ export default function CommandBar(props) {
             <button
               type="button"
               class="command-item"
-              classList={{ active: Boolean(item.menu && props.state.activeMenu === item.menu) }}
+              classList={{
+                active: Boolean(item.menu && props.state.activeMenu === item.menu),
+                "mobile-only-command": Boolean(item.mobileOnly),
+              }}
               onClick={() => {
                 if (item.menu) props.actions.openCommandMenu(item.menu);
                 else props.actions.runTopLevelCommand(item.action);

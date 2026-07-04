@@ -429,6 +429,23 @@ export function createTerminalController({
     return data.pane || null;
   }
 
+  async function zoomActivePaneForMobile(sessionName = state.activeSession) {
+    if (!sessionName || !isMobileViewport() || !canUseTerminalControl(sessionName)) return;
+    const zoomState = getResponsiveZoomState(sessionName);
+    noteResponsiveViewport(zoomState, true);
+    let zoomed;
+    try {
+      zoomed = await setWindowZoomed(sessionName, true);
+    } catch (_) {
+      return;
+    }
+    if (state.activeSession !== sessionName) return;
+    zoomState.autoZoomed = zoomed;
+    zoomState.mobilePrepared = zoomed;
+    zoomState.desktopPrepared = false;
+    if (zoomed) afterResponsiveZoomChange(sessionName);
+  }
+
   async function clearResponsiveWindowZoomed(sessionName) {
     if (!canUseTerminalControl(sessionName)) {
       throw new Error("terminal websocket is not connected");
@@ -780,5 +797,6 @@ export function createTerminalController({
     selectWindowPane,
     sync,
     unmount,
+    zoomActivePaneForMobile,
   };
 }
