@@ -8,15 +8,16 @@ use auth::AuthState;
 use axum::{
     body::{Body, Bytes},
     extract::{
-        ws::{Message, WebSocketUpgrade},
+        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Json, Router,
 };
 use clap::{Parser, ValueEnum};
+use futures_util::{SinkExt, StreamExt};
 use pty::TerminalSize;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -24,7 +25,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use tmux::{TmuxConfig, TmuxPane, TmuxSession, TmuxWindow};
+use tmux::{TmuxConfig, TmuxSession};
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
@@ -95,19 +96,32 @@ struct CreateSessionRequest {
 }
 
 #[derive(Deserialize)]
-struct CreateWindowRequest {
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct RenameSessionRequest {
     name: String,
 }
 
-#[derive(Deserialize)]
-struct ZoomRequest {
-    zoomed: bool,
-    managed: Option<bool>,
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ControlMessage {
+    ListWindows {
+        request_id: String,
+        session_name: String,
+    },
+    CreateWindow {
+        request_id: String,
+        session_name: String,
+        name: Option<String>,
+    },
+    SelectWindow {
+        request_id: String,
+        session_name: String,
+        window_id: String,
+    },
+    KillWindow {
+        request_id: String,
+        session_name: String,
+        window_id: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -138,33 +152,8 @@ struct SessionsResponse {
 }
 
 #[derive(Serialize)]
-struct PanesResponse {
-    panes: Vec<TmuxPane>,
-}
-
-#[derive(Serialize)]
-struct PaneResponse {
-    pane: TmuxPane,
-}
-
-#[derive(Serialize)]
-struct ZoomResponse {
-    zoomed: bool,
-}
-
-#[derive(Serialize)]
-struct WindowsResponse {
-    windows: Vec<TmuxWindow>,
-}
-
-#[derive(Serialize)]
 struct SessionResponse {
     session: TmuxSession,
-}
-
-#[derive(Serialize)]
-struct WindowResponse {
-    window: TmuxWindow,
 }
 
 #[derive(Serialize)]
@@ -190,24 +179,6 @@ async fn main() -> Result<()> {
         .route("/api/me", get(me))
         .route("/api/config", get(config))
         .route("/api/sessions", get(list_sessions).post(create_session))
-        .route(
-            "/api/sessions/{name}/windows",
-            get(list_windows).post(create_window),
-        )
-        .route(
-            "/api/sessions/{name}/windows/{window_id}",
-            put(select_window).delete(kill_window),
-        )
-        .route(
-            "/api/sessions/{name}/windows/{window_id}/panes",
-            get(list_window_panes),
-        )
-        .route(
-            "/api/sessions/{name}/windows/{window_id}/panes/{pane_id}",
-            put(select_window_pane),
-        )
-        .route("/api/sessions/{name}/zoom", get(get_zoom).post(set_zoom))
-        .route("/api/sessions/{name}/zoom/auto", delete(clear_auto_zoom))
         .route(
             "/api/sessions/{name}",
             delete(kill_session).put(rename_session),
@@ -342,147 +313,6 @@ async fn create_session(
         .map_err(bad_request)
 }
 
-async fn list_window_panes(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((name, window_id)): Path<(String, String)>,
-) -> ApiResult<PanesResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .list_panes_for_window(&name, &window_id)
-        .await
-        .map(|panes| Json(PanesResponse { panes }))
-        .map_err(bad_request)
-}
-
-async fn select_window_pane(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((name, window_id, pane_id)): Path<(String, String, String)>,
-) -> ApiResult<PaneResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .select_pane_in_window(&name, &window_id, &pane_id)
-        .await
-        .map(|pane| Json(PaneResponse { pane }))
-        .map_err(bad_request)
-}
-
-async fn list_windows(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-) -> ApiResult<WindowsResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .list_windows(&name)
-        .await
-        .map(|windows| Json(WindowsResponse { windows }))
-        .map_err(bad_request)
-}
-
-async fn create_window(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(request): Json<CreateWindowRequest>,
-) -> ApiResult<WindowResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .create_window(&name, request.name)
-        .await
-        .map(|window| Json(WindowResponse { window }))
-        .map_err(bad_request)
-}
-
-async fn select_window(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((name, window_id)): Path<(String, String)>,
-) -> ApiResult<WindowResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .select_window(&name, &window_id)
-        .await
-        .map(|window| Json(WindowResponse { window }))
-        .map_err(bad_request)
-}
-
-async fn kill_window(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path((name, window_id)): Path<(String, String)>,
-) -> ApiResult<MeResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .kill_window(&name, &window_id)
-        .await
-        .map(|_| {
-            Json(MeResponse {
-                authenticated: true,
-            })
-        })
-        .map_err(bad_request)
-}
-
-async fn get_zoom(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-) -> ApiResult<ZoomResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .window_zoomed(&name)
-        .await
-        .map(|zoomed| Json(ZoomResponse { zoomed }))
-        .map_err(bad_request)
-}
-
-async fn set_zoom(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-    Json(request): Json<ZoomRequest>,
-) -> ApiResult<ZoomResponse> {
-    require_auth(&headers, &state)?;
-    let result = if request.managed.unwrap_or(false) {
-        state
-            .tmux
-            .set_responsive_window_zoomed(&name, request.zoomed)
-            .await
-    } else {
-        state.tmux.set_window_zoomed(&name, request.zoomed).await
-    };
-    result
-        .map(|zoomed| Json(ZoomResponse { zoomed }))
-        .map_err(bad_request)
-}
-
-async fn clear_auto_zoom(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(name): Path<String>,
-) -> ApiResult<MeResponse> {
-    require_auth(&headers, &state)?;
-    state
-        .tmux
-        .clear_responsive_window_zoomed(&name)
-        .await
-        .map(|_| {
-            Json(MeResponse {
-                authenticated: true,
-            })
-        })
-        .map_err(bad_request)
-}
-
 async fn kill_session(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -537,11 +367,110 @@ async fn control_ws(
     if require_auth(&headers, &state).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(|mut socket| async move {
-        let _ = socket
-            .send(Message::Text("{\"type\":\"ready\"}".into()))
-            .await;
+    ws.on_upgrade(move |socket| run_control_socket(socket, state.tmux.clone()))
+}
+
+async fn run_control_socket(socket: WebSocket, tmux: TmuxConfig) {
+    let (mut sender, mut receiver) = socket.split();
+    while let Some(message) = receiver.next().await {
+        let Ok(message) = message else { break };
+        match message {
+            Message::Text(text) => {
+                let response = match serde_json::from_str::<ControlMessage>(&text) {
+                    Ok(message) => control_response(&tmux, message).await,
+                    Err(error) => Some(control_error("", &error)),
+                };
+                if let Some(response) = response {
+                    if sender.send(Message::Text(response.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Message::Ping(bytes) => {
+                let _ = sender.send(Message::Pong(bytes)).await;
+            }
+            Message::Close(_) => break,
+            Message::Binary(_) | Message::Pong(_) => {}
+        }
+    }
+}
+
+async fn control_response(tmux: &TmuxConfig, message: ControlMessage) -> Option<String> {
+    match message {
+        ControlMessage::ListWindows {
+            request_id,
+            session_name,
+        } => {
+            let response = match tmux.list_windows(&session_name).await {
+                Ok(windows) => control_ok(&request_id, serde_json::json!({ "windows": windows })),
+                Err(error) => control_anyhow_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ControlMessage::CreateWindow {
+            request_id,
+            session_name,
+            name,
+        } => {
+            let response = match tmux.create_window(&session_name, name).await {
+                Ok(window) => control_ok(&request_id, serde_json::json!({ "window": window })),
+                Err(error) => control_anyhow_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ControlMessage::SelectWindow {
+            request_id,
+            session_name,
+            window_id,
+        } => {
+            let response = match tmux.select_window(&session_name, &window_id).await {
+                Ok(window) => control_ok(&request_id, serde_json::json!({ "window": window })),
+                Err(error) => control_anyhow_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ControlMessage::KillWindow {
+            request_id,
+            session_name,
+            window_id,
+        } => {
+            let response = match tmux.kill_window(&session_name, &window_id).await {
+                Ok(()) => control_ok(&request_id, serde_json::json!({})),
+                Err(error) => control_anyhow_error(&request_id, &error),
+            };
+            Some(response)
+        }
+    }
+}
+
+fn control_ok(request_id: &str, data: serde_json::Value) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "request_id": request_id,
+        "ok": true,
+        "data": data,
     })
+    .to_string()
+}
+
+fn control_error(request_id: &str, error: &serde_json::Error) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "request_id": request_id,
+        "ok": false,
+        "error": error.to_string(),
+    })
+    .to_string()
+}
+
+fn control_anyhow_error(request_id: &str, error: &anyhow::Error) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "request_id": request_id,
+        "ok": false,
+        "error": error.to_string(),
+    })
+    .to_string()
 }
 
 async fn embedded_static(uri: Uri) -> Response {

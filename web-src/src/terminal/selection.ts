@@ -33,12 +33,8 @@ export function installTerminalSelectionCopy({
         moved: false,
         columnMode: event.altKey && !isMacLike(),
         panes: getCachedPanes(sessionName),
+        layoutRequested: false,
       };
-      void refreshPaneLayout(sessionName).then((panes) => {
-        if (dragSelection?.sessionName === sessionName) {
-          dragSelection.panes = panes;
-        }
-      });
     },
     { capture: true, signal },
   );
@@ -50,6 +46,15 @@ export function installTerminalSelectionCopy({
       if (!dragSelection || !terminal) return;
       if (Math.hypot(event.clientX - dragSelection.startClientX, event.clientY - dragSelection.startClientY) >= 4) {
         dragSelection.moved = true;
+      }
+      if (dragSelection.moved && !dragSelection.layoutRequested) {
+        dragSelection.layoutRequested = true;
+        const sessionName = dragSelection.sessionName;
+        void refreshPaneLayout(sessionName).then((panes) => {
+          if (dragSelection?.sessionName === sessionName) {
+            dragSelection.panes = panes;
+          }
+        });
       }
       dragSelection.endBufferCell = eventToTerminalBufferCell(event, terminalElement, terminal)
         || dragSelection.endBufferCell;

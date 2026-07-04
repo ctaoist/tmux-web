@@ -1,6 +1,7 @@
 import { api, fetchConfig, fetchMe } from "./api";
 import { isEditableTarget } from "./browser";
 import { COMMAND_MENUS, TMUX_PREFIX } from "./commands";
+import { createControlClient } from "./control";
 import {
   applyStickyModifiersToInput,
   composeSpecialKey,
@@ -11,8 +12,10 @@ export function createActions({ state, setState, getTerminal }) {
   const authorizedApi = (path: string, options: RequestInit = {}) => (
     api(path, options, handleAuthExpired)
   );
+  const control = createControlClient();
 
   function handleAuthExpired() {
+    control.close();
     setState({
       authenticated: false,
       reconnectPending: false,
@@ -50,7 +53,7 @@ export function createActions({ state, setState, getTerminal }) {
     await refreshSessions();
   }
 
-  async function refreshSessions() {
+  async function refreshSessions({ refreshWindows: shouldRefreshWindows = true } = {}) {
     const data = await authorizedApi("/api/sessions");
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
     const sessionNames = new Set(sessions.map((session) => session.name));
@@ -65,7 +68,9 @@ export function createActions({ state, setState, getTerminal }) {
     }
 
     setState({ sessions, activeSession });
-    await refreshWindows(activeSession);
+    if (shouldRefreshWindows) {
+      await refreshWindows(activeSession);
+    }
   }
 
   async function refreshWindows(sessionName = state.activeSession) {
@@ -74,8 +79,7 @@ export function createActions({ state, setState, getTerminal }) {
       return [];
     }
 
-    const data = await authorizedApi(`/api/sessions/${encodeURIComponent(sessionName)}/windows`);
-    const windows = Array.isArray(data.windows) ? data.windows : [];
+    const windows = await control.listWindows(sessionName);
     const activeWindowId = windows.find((window) => window.active)?.id || windows[0]?.id || "";
     setState({ windows, activeWindowId });
     return windows;
@@ -89,10 +93,7 @@ export function createActions({ state, setState, getTerminal }) {
 
     setState({ paneListLoading: true });
     try {
-      const data = await authorizedApi(
-        `/api/sessions/${encodeURIComponent(sessionName)}/windows/${encodeURIComponent(windowId)}/panes`,
-      );
-      const panes = Array.isArray(data.panes) ? data.panes : [];
+      const panes = await getTerminal()?.listWindowPanes(windowId, sessionName) || [];
       setState({ paneListPanes: panes, paneListLoading: false });
       return panes;
     } catch (error) {
@@ -113,12 +114,8 @@ export function createActions({ state, setState, getTerminal }) {
 
   async function selectPane(paneId) {
     if (!state.activeSession || !state.activeWindowId || !paneId) return;
-    await authorizedApi(
-      `/api/sessions/${encodeURIComponent(state.activeSession)}/windows/${encodeURIComponent(state.activeWindowId)}/panes/${encodeURIComponent(paneId)}`,
-      { method: "PUT" },
-    );
+    await getTerminal()?.selectWindowPane(state.activeWindowId, paneId, state.activeSession);
     setState({ paneListVisible: false });
-    getTerminal()?.schedulePaneLayoutRefresh(90);
     getTerminal()?.focus();
   }
 
@@ -140,14 +137,10 @@ export function createActions({ state, setState, getTerminal }) {
     const name = window.prompt("Window name", "");
     if (name === null) return null;
 
-    const data = await authorizedApi(`/api/sessions/${encodeURIComponent(state.activeSession)}/windows`, {
-      method: "POST",
-      body: JSON.stringify({ name: name.trim() || null }),
-    });
-    await refreshSessions();
+    const createdWindow = await control.createWindow(state.activeSession, name.trim() || null);
+    await refreshSessions({ refreshWindows: false });
     await refreshWindows(state.activeSession);
-    getTerminal()?.schedulePaneLayoutRefresh(120);
-    return data.window;
+    return createdWindow;
   }
 
   async function killSession(name = state.activeSession) {
@@ -169,12 +162,9 @@ export function createActions({ state, setState, getTerminal }) {
     const label = tmuxWindow ? `${tmuxWindow.index}:${tmuxWindow.name}` : windowId;
     if (!window.confirm(`Kill tmux window "${label}"?`)) return;
 
-    await authorizedApi(
-      `/api/sessions/${encodeURIComponent(state.activeSession)}/windows/${encodeURIComponent(windowId)}`,
-      { method: "DELETE" },
-    );
-    await refreshSessions();
-    getTerminal()?.schedulePaneLayoutRefresh(120);
+    await control.killWindow(state.activeSession, windowId);
+    await refreshSessions({ refreshWindows: false });
+    await refreshWindows(state.activeSession);
   }
 
   async function renameActiveSession() {
@@ -200,14 +190,9 @@ export function createActions({ state, setState, getTerminal }) {
 
   async function setActiveWindow(windowId) {
     if (!state.activeSession || !windowId || state.activeWindowId === windowId) return;
-    const data = await authorizedApi(
-      `/api/sessions/${encodeURIComponent(state.activeSession)}/windows/${encodeURIComponent(windowId)}`,
-      { method: "PUT" },
-    );
-    setState({ activeWindowId: data.window?.id || windowId, activeMenu: null });
+    const selectedWindow = await control.selectWindow(state.activeSession, windowId);
+    setState({ activeWindowId: selectedWindow?.id || windowId, activeMenu: null });
     await refreshWindows(state.activeSession);
-    getTerminal()?.schedulePaneLayoutRefresh(120);
-    getTerminal()?.requestFit({ settle: true });
   }
 
   function sendInput(data) {
@@ -386,9 +371,6 @@ export function createActions({ state, setState, getTerminal }) {
     else if (command === "help-lock") return lockCommandMode();
     else if (command === "help-back") return closeCommandMenu();
 
-    if (command.startsWith("pane-") || command.startsWith("window-")) {
-      getTerminal()?.schedulePaneLayoutRefresh(180);
-    }
     lockCommandMode();
   }
 

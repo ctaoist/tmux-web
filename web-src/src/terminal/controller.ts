@@ -1,6 +1,5 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { api } from "../api";
 import { isMobileViewport } from "../browser";
 import { installTerminalSelectionCopy } from "./selection";
 import { TERMINAL_THEMES } from "./themes";
@@ -22,6 +21,8 @@ export function createTerminalController({
     terminal: null,
     fitAddon: null,
     socket: null,
+    controlRequests: new Map(),
+    nextControlRequestId: 1,
     resizeObserver: null,
     touchScrollController: null,
     selectionCopyController: null,
@@ -36,6 +37,8 @@ export function createTerminalController({
     resizeTimer: 0,
     fitFrame: 0,
     settleFitTimer: 0,
+    lastResizeCols: 0,
+    lastResizeRows: 0,
   };
 
   function mount(element) {
@@ -107,33 +110,7 @@ export function createTerminalController({
   function beginConnection(sessionName = state.activeSession) {
     if (!sessionName || !runtime.terminal) return;
     const runId = ++runtime.connectionRunId;
-    void connectAfterResponsiveLayoutPrep(runId, sessionName);
-  }
-
-  async function connectAfterResponsiveLayoutPrep(runId, sessionName) {
-    setState({
-      reconnectPending: false,
-      connectionStatus: state.hasDisconnected ? "reconnecting" : "connecting",
-      connectionMessage: "",
-      connectionTransient: false,
-    });
-
-    const prepared = await prepareResponsiveZoomBeforeAttach(sessionName);
-    if (!isCurrentConnectionRun(runId, sessionName)) return;
-    if (!prepared) {
-      setState({
-        connected: false,
-        reconnectPending: true,
-        hasDisconnected: true,
-        connectionStatus: "disconnected",
-        connectionMessage: "Unable to prepare responsive layout",
-        connectionTransient: false,
-      });
-      focus();
-      return;
-    }
-
-    connect(sessionName);
+    connect(runId, sessionName);
   }
 
   function isCurrentConnectionRun(runId, sessionName) {
@@ -142,7 +119,7 @@ export function createTerminalController({
       && Boolean(runtime.terminal);
   }
 
-  function connect(sessionName = state.activeSession) {
+  function connect(runId, sessionName = state.activeSession) {
     if (!sessionName || !runtime.terminal) return;
 
     setState({
@@ -163,25 +140,13 @@ export function createTerminalController({
     const socket = new WebSocket(`${protocol}://${location.host}/ws/terminal?${params}`) as TmuxWebSocket;
     socket.binaryType = "arraybuffer";
     runtime.socket = socket;
+    runtime.lastResizeCols = 0;
+    runtime.lastResizeRows = 0;
     setState("connected", false);
 
     socket.addEventListener("open", () => {
       if (socket !== runtime.socket) return;
-      setState({
-        connected: true,
-        connectionStatus: "connected",
-        reconnectPending: false,
-      });
-      if (state.hasDisconnected) {
-        showTransientOverlay("Reconnected", 900);
-      } else {
-        clearOverlay();
-      }
-      setState("hasDisconnected", false);
-      fitAndResize();
-      schedulePaneLayoutRefresh(90);
-      scheduleResponsiveZoom(90);
-      focus();
+      void attachAfterResponsiveLayoutPrep(runId, sessionName, socket);
     });
 
     socket.addEventListener("message", (event) => {
@@ -190,6 +155,7 @@ export function createTerminalController({
       if (event.data instanceof ArrayBuffer) {
         runtime.terminal.write(new Uint8Array(event.data));
       } else {
+        if (handleTerminalControlMessage(event.data)) return;
         runtime.terminal.write(event.data);
       }
     });
@@ -203,6 +169,7 @@ export function createTerminalController({
     socket.addEventListener("close", (event) => {
       if (socket !== runtime.socket) return;
       if (socket._tmuxWebIntentionalClose) return;
+      rejectTerminalControlRequests(new Error("terminal websocket closed"));
       setState({
         connected: false,
         connectionStatus: "disconnected",
@@ -215,6 +182,45 @@ export function createTerminalController({
     });
   }
 
+  async function attachAfterResponsiveLayoutPrep(runId, sessionName, socket) {
+    const prepared = await prepareResponsiveZoomBeforeAttach(sessionName);
+    if (!isCurrentConnectionRun(runId, sessionName) || socket !== runtime.socket) return;
+    if (!prepared) {
+      socket._tmuxWebIntentionalClose = true;
+      socket.close();
+      if (socket === runtime.socket) runtime.socket = null;
+      setState({
+        connected: false,
+        reconnectPending: true,
+        hasDisconnected: true,
+        connectionStatus: "disconnected",
+        connectionMessage: "Unable to prepare responsive layout",
+        connectionTransient: false,
+      });
+      focus();
+      return;
+    }
+
+    fitTerminalViewport();
+    const { cols, rows } = proposedSize();
+    socket.send(JSON.stringify({ type: "attach", cols, rows }));
+    rememberResize(cols, rows);
+    setState({
+      connected: true,
+      connectionStatus: "connected",
+      reconnectPending: false,
+    });
+    if (state.hasDisconnected) {
+      showTransientOverlay("Reconnected", 900);
+    } else {
+      clearOverlay();
+    }
+    setState("hasDisconnected", false);
+    fitAndResize();
+    scheduleResponsiveZoom(90);
+    focus();
+  }
+
   function close({ disposeTerminal = true, intentional = true } = {}) {
     runtime.connectionRunId += 1;
     if (runtime.socket) {
@@ -222,6 +228,7 @@ export function createTerminalController({
       runtime.socket.close();
     }
     runtime.socket = null;
+    rejectTerminalControlRequests(new Error("terminal websocket closed"));
     setState({
       connected: false,
       reconnectPending: false,
@@ -322,32 +329,111 @@ export function createTerminalController({
 
   function sendResize(cols, rows) {
     if (!runtime.socket || runtime.socket.readyState !== WebSocket.OPEN) return;
+    if (runtime.lastResizeCols === cols && runtime.lastResizeRows === rows) return;
+    rememberResize(cols, rows);
     runtime.socket.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
+  function rememberResize(cols, rows) {
+    runtime.lastResizeCols = cols;
+    runtime.lastResizeRows = rows;
+  }
+
+  function sendTerminalControlRequest(type, payload = {}) {
+    const socket = runtime.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("terminal websocket is not connected"));
+    }
+
+    const requestId = String(runtime.nextControlRequestId++);
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        runtime.controlRequests.delete(requestId);
+        reject(new Error("terminal websocket request timed out"));
+      }, 8000);
+      runtime.controlRequests.set(requestId, { resolve, reject, timer });
+      socket.send(JSON.stringify({
+        type,
+        request_id: requestId,
+        ...payload,
+      }));
+    });
+  }
+
+  function handleTerminalControlMessage(data) {
+    let message;
+    try {
+      message = JSON.parse(data);
+    } catch (_) {
+      return false;
+    }
+    if (message?.type !== "terminal_response" || !message.request_id) return false;
+
+    const pending = runtime.controlRequests.get(message.request_id);
+    if (!pending) return true;
+    runtime.controlRequests.delete(message.request_id);
+    clearTimeout(pending.timer);
+    if (message.ok) {
+      pending.resolve(message.data || {});
+    } else {
+      pending.reject(new Error(message.error || "terminal websocket request failed"));
+    }
+    return true;
+  }
+
+  function rejectTerminalControlRequests(error) {
+    for (const pending of runtime.controlRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    runtime.controlRequests.clear();
+  }
+
+  function canUseTerminalControl(sessionName = state.activeSession) {
+    return sessionName === state.activeSession
+      && runtime.socket
+      && runtime.socket.readyState === WebSocket.OPEN;
+  }
+
   async function fetchWindowZoomed(sessionName) {
-    const data = await api(`/api/sessions/${encodeURIComponent(sessionName)}/zoom`, {}, onAuthExpired);
+    if (!canUseTerminalControl(sessionName)) {
+      throw new Error("terminal websocket is not connected");
+    }
+    const data: any = await sendTerminalControlRequest("get_zoom");
     return Boolean(data.zoomed);
   }
 
   async function setWindowZoomed(sessionName, zoomed) {
-    const data = await api(
-      `/api/sessions/${encodeURIComponent(sessionName)}/zoom`,
-      {
-        method: "POST",
-        body: JSON.stringify({ zoomed, managed: true }),
-      },
-      onAuthExpired,
-    );
+    if (!canUseTerminalControl(sessionName)) {
+      throw new Error("terminal websocket is not connected");
+    }
+    const data: any = await sendTerminalControlRequest("set_zoom", {
+      zoomed,
+      managed: true,
+    });
     return Boolean(data.zoomed);
   }
 
+  async function listWindowPanes(windowId = state.activeWindowId, sessionName = state.activeSession) {
+    if (!windowId || !canUseTerminalControl(sessionName)) return [];
+    const data: any = await sendTerminalControlRequest("list_panes", { window_id: windowId });
+    return Array.isArray(data.panes) ? data.panes : [];
+  }
+
+  async function selectWindowPane(windowId, paneId, sessionName = state.activeSession) {
+    if (!windowId || !paneId || !canUseTerminalControl(sessionName)) return null;
+    const data: any = await sendTerminalControlRequest("select_pane", {
+      window_id: windowId,
+      pane_id: paneId,
+    });
+    return data.pane || null;
+  }
+
   async function clearResponsiveWindowZoomed(sessionName) {
-    await api(
-      `/api/sessions/${encodeURIComponent(sessionName)}/zoom/auto`,
-      { method: "DELETE" },
-      onAuthExpired,
-    );
+    if (!canUseTerminalControl(sessionName)) {
+      throw new Error("terminal websocket is not connected");
+    }
+    await sendTerminalControlRequest("clear_auto_zoom");
   }
 
   function getResponsiveZoomState(sessionName) {
@@ -358,15 +444,36 @@ export function createTerminalController({
         wasZoomedBeforeAuto: false,
         mobilePrepared: false,
         desktopPrepared: false,
+        lastViewportMobile: null,
       };
       runtime.responsiveZoomBySession.set(sessionName, zoomState);
     }
     return zoomState;
   }
 
+  function noteResponsiveViewport(zoomState, shouldZoom) {
+    const previous = zoomState.lastViewportMobile;
+    zoomState.lastViewportMobile = shouldZoom;
+    if (previous === null || previous === undefined || previous === shouldZoom) return false;
+    if (shouldZoom) {
+      zoomState.mobilePrepared = false;
+    } else {
+      zoomState.desktopPrepared = false;
+    }
+    return true;
+  }
+
+  function needsResponsiveZoomSync(zoomState, shouldZoom) {
+    if (shouldZoom) {
+      return !zoomState.mobilePrepared;
+    }
+    return zoomState.autoZoomed || !zoomState.desktopPrepared;
+  }
+
   async function prepareResponsiveZoomBeforeAttach(sessionName) {
     const shouldZoom = isMobileViewport();
     const zoomState = getResponsiveZoomState(sessionName);
+    noteResponsiveViewport(zoomState, shouldZoom);
     let currentlyZoomed;
     try {
       currentlyZoomed = await fetchWindowZoomed(sessionName);
@@ -447,6 +554,9 @@ export function createTerminalController({
 
     const shouldZoom = isMobileViewport();
     const zoomState = getResponsiveZoomState(sessionName);
+    noteResponsiveViewport(zoomState, shouldZoom);
+    if (!needsResponsiveZoomSync(zoomState, shouldZoom)) return;
+
     let currentlyZoomed;
     try {
       currentlyZoomed = await fetchWindowZoomed(sessionName);
@@ -517,7 +627,6 @@ export function createTerminalController({
 
   function afterResponsiveZoomChange(sessionName) {
     requestFit({ settle: true });
-    schedulePaneLayoutRefresh(140);
     if (state.activeSession === sessionName) focus();
   }
 
@@ -555,7 +664,6 @@ export function createTerminalController({
     runtime.resizeTimer = window.setTimeout(() => {
       const { cols, rows } = proposedSize();
       sendResize(cols, rows);
-      schedulePaneLayoutRefresh(90);
     }, 40);
   }
 
@@ -576,20 +684,26 @@ export function createTerminalController({
 
   function handleViewportChange() {
     const sessionName = state.activeSession;
-    if (sessionName && !isMobileViewport()) {
-      getResponsiveZoomState(sessionName).desktopPrepared = false;
+    if (sessionName) {
+      const shouldZoom = isMobileViewport();
+      const zoomState = getResponsiveZoomState(sessionName);
+      const viewportChanged = noteResponsiveViewport(zoomState, shouldZoom);
+      if (viewportChanged || needsResponsiveZoomSync(zoomState, shouldZoom)) {
+        scheduleResponsiveZoom(0);
+      }
     }
-    scheduleResponsiveZoom(0);
     requestFit({ settle: true });
   }
 
   function handlePageActivation() {
     const sessionName = state.activeSession;
     if (!sessionName) return;
-    if (!isMobileViewport()) {
-      getResponsiveZoomState(sessionName).desktopPrepared = false;
+    const shouldZoom = isMobileViewport();
+    const zoomState = getResponsiveZoomState(sessionName);
+    const viewportChanged = noteResponsiveViewport(zoomState, shouldZoom);
+    if (viewportChanged || needsResponsiveZoomSync(zoomState, shouldZoom)) {
+      scheduleResponsiveZoom(0);
     }
-    scheduleResponsiveZoom(0);
   }
 
   function applyTheme(theme) {
@@ -613,12 +727,7 @@ export function createTerminalController({
   async function refreshPaneLayout(sessionName = state.activeSession) {
     if (!sessionName || sessionName !== state.activeSession || !state.activeWindowId) return [];
     try {
-      const data = await api(
-        `/api/sessions/${encodeURIComponent(sessionName)}/windows/${encodeURIComponent(state.activeWindowId)}/panes`,
-        {},
-        onAuthExpired,
-      );
-      const panes = Array.isArray(data.panes) ? data.panes : [];
+      const panes = await listWindowPanes(state.activeWindowId, sessionName);
       runtime.panesBySession.set(sessionName, panes);
       return panes;
     } catch (_) {
@@ -650,7 +759,7 @@ export function createTerminalController({
     const zoomState = getResponsiveZoomState(sessionName);
     zoomState.autoZoomed = false;
     zoomState.wasZoomedBeforeAuto = true;
-    void clearResponsiveWindowZoomed(sessionName);
+    void clearResponsiveWindowZoomed(sessionName).catch(() => {});
   }
 
   return {
@@ -662,11 +771,13 @@ export function createTerminalController({
     handleViewportChange,
     mount,
     noteManualPaneZoom,
+    listWindowPanes,
     reconnect,
     retainPaneCacheForSessions,
     requestFit,
     schedulePaneLayoutRefresh,
     sendInput,
+    selectWindowPane,
     sync,
     unmount,
   };
