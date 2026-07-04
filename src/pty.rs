@@ -16,6 +16,7 @@ enum ClientTerminalMessage {
     Attach {
         cols: u16,
         rows: u16,
+        client_kind: ClientKind,
     },
     Input {
         data: String,
@@ -24,6 +25,7 @@ enum ClientTerminalMessage {
         cols: u16,
         rows: u16,
     },
+    ClientActivity,
     GetZoom {
         request_id: String,
     },
@@ -44,6 +46,54 @@ enum ClientTerminalMessage {
         window_id: String,
         pane_id: String,
     },
+    ListWindows {
+        request_id: String,
+    },
+    CreateWindow {
+        request_id: String,
+        name: Option<String>,
+    },
+    SelectWindow {
+        request_id: String,
+        window_id: String,
+    },
+    KillWindow {
+        request_id: String,
+        window_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClientKind {
+    Mobile,
+    Desktop,
+}
+
+impl ClientKind {
+    fn should_zoom(self) -> bool {
+        matches!(self, Self::Mobile)
+    }
+}
+
+impl ClientTerminalMessage {
+    fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::GetZoom { request_id }
+            | Self::SetZoom { request_id, .. }
+            | Self::ClearAutoZoom { request_id }
+            | Self::ListPanes { request_id, .. }
+            | Self::SelectPane { request_id, .. }
+            | Self::ListWindows { request_id }
+            | Self::CreateWindow { request_id, .. }
+            | Self::SelectWindow { request_id, .. }
+            | Self::KillWindow { request_id, .. } => Some(request_id),
+            Self::Attach { .. }
+            | Self::Input { .. }
+            | Self::Resize { .. }
+            | Self::ClientActivity => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +109,12 @@ impl TerminalSize {
             rows: rows.clamp(5, 200),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct AttachInfo {
+    size: TerminalSize,
+    client_kind: ClientKind,
 }
 
 pub async fn run_terminal(
@@ -79,7 +135,10 @@ async fn run_terminal_inner(
     size: TerminalSize,
 ) -> Result<()> {
     validate_session_name(&session_name)?;
-    let size = wait_for_attach(&mut socket, &tmux, &session_name, size).await?;
+    let attach = wait_for_attach(&mut socket, size).await?;
+    apply_responsive_layout_for_client(&tmux, &session_name, attach.client_kind).await?;
+    let size = attach.size;
+    let default_client_kind = attach.client_kind;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -139,12 +198,30 @@ async fn run_terminal_inner(
                         let parsed = serde_json::from_str::<ClientTerminalMessage>(&text);
                         match parsed {
                             Ok(ClientTerminalMessage::Input { data }) => {
+                                if let Err(error) = apply_responsive_layout_for_client(
+                                    &tmux,
+                                    &session_name,
+                                    default_client_kind,
+                                )
+                                .await
+                                {
+                                    eprintln!("failed to apply responsive layout before input: {error:#}");
+                                }
                                 if writer.write_all(data.as_bytes()).is_err() {
                                     break;
                                 }
                                 let _ = writer.flush();
                             }
                             Ok(ClientTerminalMessage::Resize { cols, rows }) => {
+                                if let Err(error) = apply_responsive_layout_for_client(
+                                    &tmux,
+                                    &session_name,
+                                    default_client_kind,
+                                )
+                                .await
+                                {
+                                    eprintln!("failed to apply responsive layout before resize: {error:#}");
+                                }
                                 let size = TerminalSize::clamped(cols, rows);
                                 let _ = master.resize(PtySize {
                                     rows: size.rows,
@@ -155,8 +232,13 @@ async fn run_terminal_inner(
                             }
                             Ok(ClientTerminalMessage::Attach { .. }) => {}
                             Ok(message) => {
-                                if let Some(response) =
-                                    control_response(&tmux, &session_name, message).await
+                                if let Some(response) = control_response(
+                                    &tmux,
+                                    &session_name,
+                                    default_client_kind,
+                                    message,
+                                )
+                                .await
                                 {
                                     if ws_tx.send(Message::Text(response.into())).await.is_err() {
                                         break;
@@ -167,6 +249,15 @@ async fn run_terminal_inner(
                         }
                     }
                     Message::Binary(bytes) => {
+                        if let Err(error) = apply_responsive_layout_for_client(
+                            &tmux,
+                            &session_name,
+                            default_client_kind,
+                        )
+                        .await
+                        {
+                            eprintln!("failed to apply responsive layout before binary input: {error:#}");
+                        }
                         if writer.write_all(&bytes).is_err() {
                             break;
                         }
@@ -189,10 +280,8 @@ async fn run_terminal_inner(
 
 async fn wait_for_attach(
     socket: &mut WebSocket,
-    tmux: &TmuxConfig,
-    session_name: &str,
     fallback_size: TerminalSize,
-) -> Result<TerminalSize> {
+) -> Result<AttachInfo> {
     let mut size = fallback_size;
     loop {
         let Some(message) = socket.next().await else {
@@ -203,16 +292,26 @@ async fn wait_for_attach(
             Message::Text(text) => {
                 let parsed = serde_json::from_str::<ClientTerminalMessage>(&text);
                 match parsed {
-                    Ok(ClientTerminalMessage::Attach { cols, rows }) => {
-                        return Ok(TerminalSize::clamped(cols, rows));
+                    Ok(ClientTerminalMessage::Attach {
+                        cols,
+                        rows,
+                        client_kind,
+                    }) => {
+                        return Ok(AttachInfo {
+                            size: TerminalSize::clamped(cols, rows),
+                            client_kind,
+                        });
                     }
                     Ok(ClientTerminalMessage::Resize { cols, rows }) => {
                         size = TerminalSize::clamped(cols, rows);
                     }
                     Ok(ClientTerminalMessage::Input { .. }) => {}
                     Ok(message) => {
-                        if let Some(response) = control_response(tmux, session_name, message).await
-                        {
+                        if let Some(request_id) = message.request_id() {
+                            let response = control_error_message(
+                                request_id,
+                                "terminal attach must be sent before control messages",
+                            );
                             if socket.send(Message::Text(response.into())).await.is_err() {
                                 return Err(anyhow::anyhow!(
                                     "terminal websocket closed before attach"
@@ -240,9 +339,18 @@ async fn wait_for_attach(
 async fn control_response(
     tmux: &TmuxConfig,
     session_name: &str,
+    default_client_kind: ClientKind,
     message: ClientTerminalMessage,
 ) -> Option<String> {
     match message {
+        ClientTerminalMessage::ClientActivity => {
+            if let Err(error) =
+                apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await
+            {
+                eprintln!("failed to apply responsive layout for client activity: {error:#}");
+            }
+            None
+        }
         ClientTerminalMessage::GetZoom { request_id } => {
             let response = match tmux.window_zoomed(session_name).await {
                 Ok(zoomed) => control_ok(&request_id, serde_json::json!({ "zoomed": zoomed })),
@@ -278,7 +386,12 @@ async fn control_response(
             request_id,
             window_id,
         } => {
-            let response = match tmux.list_panes_for_window(session_name, &window_id).await {
+            let result = async {
+                apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await?;
+                tmux.list_panes_for_window(session_name, &window_id).await
+            }
+            .await;
+            let response = match result {
                 Ok(panes) => control_ok(&request_id, serde_json::json!({ "panes": panes })),
                 Err(error) => control_error(&request_id, &error),
             };
@@ -289,11 +402,102 @@ async fn control_response(
             window_id,
             pane_id,
         } => {
-            let response = match tmux
-                .select_pane_in_window(session_name, &window_id, &pane_id)
-                .await
-            {
+            let result = async {
+                if !default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                let pane = tmux
+                    .select_pane_in_window(session_name, &window_id, &pane_id)
+                    .await?;
+                if default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                Ok(pane)
+            }
+            .await;
+            let response = match result {
                 Ok(pane) => control_ok(&request_id, serde_json::json!({ "pane": pane })),
+                Err(error) => control_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ClientTerminalMessage::ListWindows { request_id } => {
+            let result = async {
+                apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await?;
+                tmux.list_windows(session_name).await
+            }
+            .await;
+            let response = match result {
+                Ok(windows) => control_ok(&request_id, serde_json::json!({ "windows": windows })),
+                Err(error) => control_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ClientTerminalMessage::CreateWindow { request_id, name } => {
+            let result = async {
+                if !default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                let window = tmux.create_window(session_name, name).await?;
+                if default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                Ok(window)
+            }
+            .await;
+            let response = match result {
+                Ok(window) => control_ok(&request_id, serde_json::json!({ "window": window })),
+                Err(error) => control_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ClientTerminalMessage::SelectWindow {
+            request_id,
+            window_id,
+        } => {
+            let result = async {
+                if !default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                let window = tmux.select_window(session_name, &window_id).await?;
+                if default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                Ok(window)
+            }
+            .await;
+            let response = match result {
+                Ok(window) => control_ok(&request_id, serde_json::json!({ "window": window })),
+                Err(error) => control_error(&request_id, &error),
+            };
+            Some(response)
+        }
+        ClientTerminalMessage::KillWindow {
+            request_id,
+            window_id,
+        } => {
+            let result = async {
+                if !default_client_kind.should_zoom() {
+                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                        .await?;
+                }
+                tmux.kill_window(session_name, &window_id).await?;
+                if default_client_kind.should_zoom() {
+                    let _ =
+                        apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
+                            .await;
+                }
+                Ok(())
+            }
+            .await;
+            let response = match result {
+                Ok(()) => control_ok(&request_id, serde_json::json!({})),
                 Err(error) => control_error(&request_id, &error),
             };
             Some(response)
@@ -302,6 +506,16 @@ async fn control_response(
         | ClientTerminalMessage::Input { .. }
         | ClientTerminalMessage::Resize { .. } => None,
     }
+}
+
+async fn apply_responsive_layout_for_client(
+    tmux: &TmuxConfig,
+    session_name: &str,
+    client_kind: ClientKind,
+) -> Result<()> {
+    tmux.set_responsive_window_zoomed(session_name, client_kind.should_zoom())
+        .await?;
+    Ok(())
 }
 
 fn control_ok(request_id: &str, data: serde_json::Value) -> String {
@@ -315,11 +529,15 @@ fn control_ok(request_id: &str, data: serde_json::Value) -> String {
 }
 
 fn control_error(request_id: &str, error: &anyhow::Error) -> String {
+    control_error_message(request_id, &error.to_string())
+}
+
+fn control_error_message(request_id: &str, error: &str) -> String {
     serde_json::json!({
         "type": "terminal_response",
         "request_id": request_id,
         "ok": false,
-        "error": error.to_string(),
+        "error": error,
     })
     .to_string()
 }

@@ -1,7 +1,6 @@
 import { api, fetchConfig, fetchMe } from "./api";
 import { isEditableTarget } from "./browser";
 import { COMMAND_MENUS, TMUX_PREFIX } from "./commands";
-import { createControlClient } from "./control";
 import {
   applyStickyModifiersToInput,
   composeSpecialKey,
@@ -12,10 +11,8 @@ export function createActions({ state, setState, getTerminal }) {
   const authorizedApi = (path: string, options: RequestInit = {}) => (
     api(path, options, handleAuthExpired)
   );
-  const control = createControlClient();
 
   function handleAuthExpired() {
-    control.close();
     setState({
       authenticated: false,
       reconnectPending: false,
@@ -79,7 +76,7 @@ export function createActions({ state, setState, getTerminal }) {
       return [];
     }
 
-    const windows = await control.listWindows(sessionName);
+    const windows = await getTerminal()?.listWindows(sessionName) || [];
     const activeWindowId = windows.find((window) => window.active)?.id || windows[0]?.id || "";
     setState({ windows, activeWindowId });
     return windows;
@@ -116,7 +113,6 @@ export function createActions({ state, setState, getTerminal }) {
     if (!state.activeSession || !state.activeWindowId || !paneId) return;
     const terminal = getTerminal();
     await terminal?.selectWindowPane(state.activeWindowId, paneId, state.activeSession);
-    await terminal?.zoomActivePaneForMobile(state.activeSession);
     setState({ paneListVisible: false });
     terminal?.focus();
   }
@@ -139,7 +135,8 @@ export function createActions({ state, setState, getTerminal }) {
     const name = window.prompt("Window name", "");
     if (name === null) return null;
 
-    const createdWindow = await control.createWindow(state.activeSession, name.trim() || null);
+    const terminal = getTerminal();
+    const createdWindow = await terminal?.createWindow(name.trim() || null, state.activeSession);
     await refreshSessions({ refreshWindows: false });
     await refreshWindows(state.activeSession);
     return createdWindow;
@@ -164,7 +161,8 @@ export function createActions({ state, setState, getTerminal }) {
     const label = tmuxWindow ? `${tmuxWindow.index}:${tmuxWindow.name}` : windowId;
     if (!window.confirm(`Kill tmux window "${label}"?`)) return;
 
-    await control.killWindow(state.activeSession, windowId);
+    const terminal = getTerminal();
+    await terminal?.killWindow(windowId, state.activeSession);
     await refreshSessions({ refreshWindows: false });
     await refreshWindows(state.activeSession);
   }
@@ -192,7 +190,7 @@ export function createActions({ state, setState, getTerminal }) {
 
   async function setActiveWindow(windowId) {
     if (!state.activeSession || !windowId || state.activeWindowId === windowId) return;
-    const selectedWindow = await control.selectWindow(state.activeSession, windowId);
+    const selectedWindow = await getTerminal()?.selectWindow(windowId, state.activeSession);
     setState({ activeWindowId: selectedWindow?.id || windowId, activeMenu: null });
     await refreshWindows(state.activeSession);
   }

@@ -7,17 +7,13 @@ use anyhow::{anyhow, Context, Result};
 use auth::AuthState;
 use axum::{
     body::{Body, Bytes},
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
-    },
+    extract::{ws::WebSocketUpgrade, Path, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use clap::{Parser, ValueEnum};
-use futures_util::{SinkExt, StreamExt};
 use pty::TerminalSize;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -100,30 +96,6 @@ struct RenameSessionRequest {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ControlMessage {
-    ListWindows {
-        request_id: String,
-        session_name: String,
-    },
-    CreateWindow {
-        request_id: String,
-        session_name: String,
-        name: Option<String>,
-    },
-    SelectWindow {
-        request_id: String,
-        session_name: String,
-        window_id: String,
-    },
-    KillWindow {
-        request_id: String,
-        session_name: String,
-        window_id: String,
-    },
-}
-
 #[derive(Deserialize)]
 struct TerminalQuery {
     session: String,
@@ -183,8 +155,7 @@ async fn main() -> Result<()> {
             "/api/sessions/{name}",
             delete(kill_session).put(rename_session),
         )
-        .route("/ws/terminal", get(terminal_ws))
-        .route("/ws/control", get(control_ws));
+        .route("/ws/terminal", get(terminal_ws));
 
     let app = if let Some(static_dir) = &args.static_dir {
         let index_file = static_dir.join("index.html");
@@ -357,120 +328,6 @@ async fn terminal_ws(
     }
     let size = TerminalSize::clamped(query.cols.unwrap_or(100), query.rows.unwrap_or(30));
     ws.on_upgrade(move |socket| pty::run_terminal(socket, state.tmux.clone(), query.session, size))
-}
-
-async fn control_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
-    if require_auth(&headers, &state).is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    ws.on_upgrade(move |socket| run_control_socket(socket, state.tmux.clone()))
-}
-
-async fn run_control_socket(socket: WebSocket, tmux: TmuxConfig) {
-    let (mut sender, mut receiver) = socket.split();
-    while let Some(message) = receiver.next().await {
-        let Ok(message) = message else { break };
-        match message {
-            Message::Text(text) => {
-                let response = match serde_json::from_str::<ControlMessage>(&text) {
-                    Ok(message) => control_response(&tmux, message).await,
-                    Err(error) => Some(control_error("", &error)),
-                };
-                if let Some(response) = response {
-                    if sender.send(Message::Text(response.into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-            Message::Ping(bytes) => {
-                let _ = sender.send(Message::Pong(bytes)).await;
-            }
-            Message::Close(_) => break,
-            Message::Binary(_) | Message::Pong(_) => {}
-        }
-    }
-}
-
-async fn control_response(tmux: &TmuxConfig, message: ControlMessage) -> Option<String> {
-    match message {
-        ControlMessage::ListWindows {
-            request_id,
-            session_name,
-        } => {
-            let response = match tmux.list_windows(&session_name).await {
-                Ok(windows) => control_ok(&request_id, serde_json::json!({ "windows": windows })),
-                Err(error) => control_anyhow_error(&request_id, &error),
-            };
-            Some(response)
-        }
-        ControlMessage::CreateWindow {
-            request_id,
-            session_name,
-            name,
-        } => {
-            let response = match tmux.create_window(&session_name, name).await {
-                Ok(window) => control_ok(&request_id, serde_json::json!({ "window": window })),
-                Err(error) => control_anyhow_error(&request_id, &error),
-            };
-            Some(response)
-        }
-        ControlMessage::SelectWindow {
-            request_id,
-            session_name,
-            window_id,
-        } => {
-            let response = match tmux.select_window(&session_name, &window_id).await {
-                Ok(window) => control_ok(&request_id, serde_json::json!({ "window": window })),
-                Err(error) => control_anyhow_error(&request_id, &error),
-            };
-            Some(response)
-        }
-        ControlMessage::KillWindow {
-            request_id,
-            session_name,
-            window_id,
-        } => {
-            let response = match tmux.kill_window(&session_name, &window_id).await {
-                Ok(()) => control_ok(&request_id, serde_json::json!({})),
-                Err(error) => control_anyhow_error(&request_id, &error),
-            };
-            Some(response)
-        }
-    }
-}
-
-fn control_ok(request_id: &str, data: serde_json::Value) -> String {
-    serde_json::json!({
-        "type": "control_response",
-        "request_id": request_id,
-        "ok": true,
-        "data": data,
-    })
-    .to_string()
-}
-
-fn control_error(request_id: &str, error: &serde_json::Error) -> String {
-    serde_json::json!({
-        "type": "control_response",
-        "request_id": request_id,
-        "ok": false,
-        "error": error.to_string(),
-    })
-    .to_string()
-}
-
-fn control_anyhow_error(request_id: &str, error: &anyhow::Error) -> String {
-    serde_json::json!({
-        "type": "control_response",
-        "request_id": request_id,
-        "ok": false,
-        "error": error.to_string(),
-    })
-    .to_string()
 }
 
 async fn embedded_static(uri: Uri) -> Response {
