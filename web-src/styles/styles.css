@@ -854,9 +854,19 @@ kbd {
     left: 0;
     right: 0;
     top: auto;
-    bottom: 0;
+    bottom: calc(var(--mobile-command-bar-height) + var(--safe-area-bottom));
     width: auto;
-    max-height: min(560px, calc(var(--viewport-height) - 72px));
+    max-height: min(
+      560px,
+      calc(
+        var(--viewport-height)
+        - var(--mobile-tabbar-height)
+        - var(--mobile-command-bar-height)
+        - var(--safe-area-top)
+        - var(--safe-area-bottom)
+        - 16px
+      )
+    );
     transform: none;
     border-right: 0;
     border-bottom: 0;
