@@ -9,6 +9,9 @@ type TmuxWebSocket = WebSocket & {
   _tmuxWebIntentionalClose?: boolean;
 };
 
+const CLIENT_ACTIVITY_THROTTLE_MS = 250;
+const POINTER_ACTIVATION_SUPPRESS_MS = 600;
+
 export function createTerminalController({
   state,
   setState,
@@ -31,6 +34,9 @@ export function createTerminalController({
     panesBySession: new Map(),
     overlayTimer: 0,
     paneLayoutRefreshTimer: 0,
+    clientActivityFrame: 0,
+    lastClientActivityAt: 0,
+    lastPointerActivationAt: 0,
     connectionRunId: 0,
     resizeTimer: 0,
     fitFrame: 0,
@@ -229,6 +235,10 @@ export function createTerminalController({
     }
 
     clearTimeout(runtime.overlayTimer);
+    if (runtime.clientActivityFrame) {
+      window.cancelAnimationFrame(runtime.clientActivityFrame);
+      runtime.clientActivityFrame = 0;
+    }
     if (disposeTerminal && runtime.resizeObserver) {
       runtime.resizeObserver.disconnect();
       runtime.resizeObserver = null;
@@ -320,6 +330,17 @@ export function createTerminalController({
     if (!runtime.socket || runtime.socket.readyState !== WebSocket.OPEN) return;
     if (!runtime.attachedClientKind) return;
     runtime.socket.send(JSON.stringify({ type: "client_activity" }));
+  }
+
+  function scheduleClientActivity() {
+    if (runtime.clientActivityFrame) return;
+    runtime.clientActivityFrame = window.requestAnimationFrame(() => {
+      runtime.clientActivityFrame = 0;
+      const now = performance.now();
+      if (now - runtime.lastClientActivityAt < CLIENT_ACTIVITY_THROTTLE_MS) return;
+      runtime.lastClientActivityAt = now;
+      sendClientActivity();
+    });
   }
 
   function sendResize(cols, rows) {
@@ -520,7 +541,16 @@ export function createTerminalController({
       restartConnectionForClientKindChange();
       return;
     }
-    sendClientActivity();
+    if (isRecentPointerActivation()) return;
+    scheduleClientActivity();
+  }
+
+  function notePointerActivation() {
+    runtime.lastPointerActivationAt = performance.now();
+  }
+
+  function isRecentPointerActivation() {
+    return performance.now() - runtime.lastPointerActivationAt < POINTER_ACTIVATION_SUPPRESS_MS;
   }
 
   function shouldReconnectForClientKindChange() {
@@ -606,6 +636,7 @@ export function createTerminalController({
     handlePageActivation,
     handleViewportChange,
     mount,
+    notePointerActivation,
     noteManualPaneZoom,
     killWindow,
     listWindows,

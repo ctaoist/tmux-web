@@ -35,7 +35,7 @@ export default function App() {
     cleanup.push(installViewportSizeSync(() => terminal.handleViewportChange()));
     cleanup.push(installContextMenuSuppression());
     window.addEventListener("keydown", actions.handleGlobalKeyEvent, true);
-    window.addEventListener("pointerdown", terminal.handlePageActivation, true);
+    window.addEventListener("pointerdown", terminal.notePointerActivation, true);
     window.addEventListener("focus", terminal.handlePageActivation);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -47,7 +47,7 @@ export default function App() {
   onCleanup(() => {
     cleanup.forEach((dispose) => dispose());
     window.removeEventListener("keydown", actions.handleGlobalKeyEvent, true);
-    window.removeEventListener("pointerdown", terminal.handlePageActivation, true);
+    window.removeEventListener("pointerdown", terminal.notePointerActivation, true);
     window.removeEventListener("focus", terminal.handlePageActivation);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     terminal.close({ disposeTerminal: true, intentional: true });
