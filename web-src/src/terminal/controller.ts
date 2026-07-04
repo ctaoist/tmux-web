@@ -1,6 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { api } from "../api";
+import { isMobileViewport } from "../browser";
 import { installTerminalSelectionCopy } from "./selection";
 import { TERMINAL_THEMES } from "./themes";
 import { installTerminalTouchScroll } from "./touch";
@@ -25,8 +26,13 @@ export function createTerminalController({
     touchScrollController: null,
     selectionCopyController: null,
     panesBySession: new Map(),
+    responsiveZoomBySession: new Map(),
     overlayTimer: 0,
     paneLayoutRefreshTimer: 0,
+    responsiveZoomTimer: 0,
+    responsiveZoomRunning: false,
+    responsiveZoomPending: false,
+    connectionRunId: 0,
     resizeTimer: 0,
     fitFrame: 0,
     settleFitTimer: 0,
@@ -54,6 +60,7 @@ export function createTerminalController({
     if (runtime.terminal && !forceReconnect) {
       observeTerminalSize(terminalElement);
       fitAndResize();
+      scheduleResponsiveZoom(90);
       return;
     }
 
@@ -90,15 +97,53 @@ export function createTerminalController({
         sendInput(applyStickyModifiers(data));
       }
     });
-    connect();
     requestAnimationFrame(() => {
-      fitAndResize();
+      fitTerminalViewport();
+      beginConnection(state.activeSession);
       focus();
     });
   }
 
-  function connect() {
-    if (!state.activeSession || !runtime.terminal) return;
+  function beginConnection(sessionName = state.activeSession) {
+    if (!sessionName || !runtime.terminal) return;
+    const runId = ++runtime.connectionRunId;
+    void connectAfterResponsiveLayoutPrep(runId, sessionName);
+  }
+
+  async function connectAfterResponsiveLayoutPrep(runId, sessionName) {
+    setState({
+      reconnectPending: false,
+      connectionStatus: state.hasDisconnected ? "reconnecting" : "connecting",
+      connectionMessage: "",
+      connectionTransient: false,
+    });
+
+    const prepared = await prepareResponsiveZoomBeforeAttach(sessionName);
+    if (!isCurrentConnectionRun(runId, sessionName)) return;
+    if (!prepared) {
+      setState({
+        connected: false,
+        reconnectPending: true,
+        hasDisconnected: true,
+        connectionStatus: "disconnected",
+        connectionMessage: "Unable to prepare responsive layout",
+        connectionTransient: false,
+      });
+      focus();
+      return;
+    }
+
+    connect(sessionName);
+  }
+
+  function isCurrentConnectionRun(runId, sessionName) {
+    return runtime.connectionRunId === runId
+      && state.activeSession === sessionName
+      && Boolean(runtime.terminal);
+  }
+
+  function connect(sessionName = state.activeSession) {
+    if (!sessionName || !runtime.terminal) return;
 
     setState({
       reconnectPending: false,
@@ -107,10 +152,11 @@ export function createTerminalController({
       connectionTransient: false,
     });
 
+    fitTerminalViewport();
     const { cols, rows } = proposedSize();
     const protocol = location.protocol === "https:" ? "wss" : "ws";
     const params = new URLSearchParams({
-      session: state.activeSession,
+      session: sessionName,
       cols: String(cols),
       rows: String(rows),
     });
@@ -120,6 +166,7 @@ export function createTerminalController({
     setState("connected", false);
 
     socket.addEventListener("open", () => {
+      if (socket !== runtime.socket) return;
       setState({
         connected: true,
         connectionStatus: "connected",
@@ -133,10 +180,12 @@ export function createTerminalController({
       setState("hasDisconnected", false);
       fitAndResize();
       schedulePaneLayoutRefresh(90);
+      scheduleResponsiveZoom(90);
       focus();
     });
 
     socket.addEventListener("message", (event) => {
+      if (socket !== runtime.socket) return;
       if (!runtime.terminal) return;
       if (event.data instanceof ArrayBuffer) {
         runtime.terminal.write(new Uint8Array(event.data));
@@ -152,6 +201,7 @@ export function createTerminalController({
     });
 
     socket.addEventListener("close", (event) => {
+      if (socket !== runtime.socket) return;
       if (socket._tmuxWebIntentionalClose) return;
       setState({
         connected: false,
@@ -166,6 +216,7 @@ export function createTerminalController({
   }
 
   function close({ disposeTerminal = true, intentional = true } = {}) {
+    runtime.connectionRunId += 1;
     if (runtime.socket) {
       runtime.socket._tmuxWebIntentionalClose = intentional;
       runtime.socket.close();
@@ -183,6 +234,7 @@ export function createTerminalController({
     }
 
     clearTimeout(runtime.overlayTimer);
+    clearTimeout(runtime.responsiveZoomTimer);
     if (disposeTerminal && runtime.resizeObserver) {
       runtime.resizeObserver.disconnect();
       runtime.resizeObserver = null;
@@ -219,7 +271,7 @@ export function createTerminalController({
       runtime.socket.close();
     }
     runtime.socket = null;
-    connect();
+    beginConnection(state.activeSession);
   }
 
   async function verifyAuthForReconnect() {
@@ -273,6 +325,202 @@ export function createTerminalController({
     runtime.socket.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
+  async function fetchWindowZoomed(sessionName) {
+    const data = await api(`/api/sessions/${encodeURIComponent(sessionName)}/zoom`, {}, onAuthExpired);
+    return Boolean(data.zoomed);
+  }
+
+  async function setWindowZoomed(sessionName, zoomed) {
+    const data = await api(
+      `/api/sessions/${encodeURIComponent(sessionName)}/zoom`,
+      {
+        method: "POST",
+        body: JSON.stringify({ zoomed, managed: true }),
+      },
+      onAuthExpired,
+    );
+    return Boolean(data.zoomed);
+  }
+
+  async function clearResponsiveWindowZoomed(sessionName) {
+    await api(
+      `/api/sessions/${encodeURIComponent(sessionName)}/zoom/auto`,
+      { method: "DELETE" },
+      onAuthExpired,
+    );
+  }
+
+  function getResponsiveZoomState(sessionName) {
+    let zoomState = runtime.responsiveZoomBySession.get(sessionName);
+    if (!zoomState) {
+      zoomState = {
+        autoZoomed: false,
+        wasZoomedBeforeAuto: false,
+        mobilePrepared: false,
+        desktopPrepared: false,
+      };
+      runtime.responsiveZoomBySession.set(sessionName, zoomState);
+    }
+    return zoomState;
+  }
+
+  async function prepareResponsiveZoomBeforeAttach(sessionName) {
+    const shouldZoom = isMobileViewport();
+    const zoomState = getResponsiveZoomState(sessionName);
+    let currentlyZoomed;
+    try {
+      currentlyZoomed = await fetchWindowZoomed(sessionName);
+    } catch (_) {
+      return false;
+    }
+
+    if (shouldZoom) {
+      if (!zoomState.autoZoomed) {
+        zoomState.wasZoomedBeforeAuto = currentlyZoomed;
+      }
+      if (!currentlyZoomed) {
+        let zoomed;
+        try {
+          zoomed = await setWindowZoomed(sessionName, true);
+        } catch (_) {
+          return false;
+        }
+        zoomState.autoZoomed = zoomed;
+        zoomState.mobilePrepared = zoomed;
+        zoomState.desktopPrepared = false;
+        return zoomed;
+      }
+      if (!zoomState.autoZoomed) {
+        zoomState.wasZoomedBeforeAuto = true;
+      }
+      zoomState.mobilePrepared = true;
+      zoomState.desktopPrepared = false;
+      return true;
+    }
+
+    zoomState.mobilePrepared = false;
+    let zoomed;
+    try {
+      zoomed = await setWindowZoomed(sessionName, false);
+    } catch (_) {
+      return false;
+    }
+    if (!zoomed) {
+      zoomState.autoZoomed = false;
+      zoomState.wasZoomedBeforeAuto = false;
+    } else if (zoomState.autoZoomed && !zoomState.wasZoomedBeforeAuto) {
+      zoomState.autoZoomed = false;
+    } else {
+      zoomState.wasZoomedBeforeAuto = true;
+    }
+    zoomState.desktopPrepared = true;
+    return true;
+  }
+
+  function scheduleResponsiveZoom(delay = 0) {
+    clearTimeout(runtime.responsiveZoomTimer);
+    runtime.responsiveZoomTimer = window.setTimeout(() => {
+      void runResponsiveZoomSync();
+    }, delay);
+  }
+
+  async function runResponsiveZoomSync() {
+    if (runtime.responsiveZoomRunning) {
+      runtime.responsiveZoomPending = true;
+      return;
+    }
+
+    runtime.responsiveZoomRunning = true;
+    try {
+      do {
+        runtime.responsiveZoomPending = false;
+        await syncResponsiveZoomOnce();
+      } while (runtime.responsiveZoomPending);
+    } finally {
+      runtime.responsiveZoomRunning = false;
+    }
+  }
+
+  async function syncResponsiveZoomOnce() {
+    const sessionName = state.activeSession;
+    if (!sessionName || !runtime.terminal || state.connectionStatus !== "connected") return;
+
+    const shouldZoom = isMobileViewport();
+    const zoomState = getResponsiveZoomState(sessionName);
+    let currentlyZoomed;
+    try {
+      currentlyZoomed = await fetchWindowZoomed(sessionName);
+    } catch (_) {
+      return;
+    }
+    if (!isCurrentResponsiveZoomTarget(sessionName)) return;
+
+    if (shouldZoom) {
+      const wasMobilePrepared = zoomState.mobilePrepared;
+      if (!zoomState.autoZoomed) {
+        zoomState.wasZoomedBeforeAuto = currentlyZoomed;
+      }
+      if (!currentlyZoomed) {
+        let zoomed;
+        try {
+          zoomed = await setWindowZoomed(sessionName, true);
+        } catch (_) {
+          return;
+        }
+        if (!isCurrentResponsiveZoomTarget(sessionName)) return;
+        zoomState.autoZoomed = zoomed;
+        zoomState.mobilePrepared = zoomed;
+        zoomState.desktopPrepared = false;
+        afterResponsiveZoomChange(sessionName);
+      } else if (!zoomState.autoZoomed) {
+        zoomState.wasZoomedBeforeAuto = true;
+        zoomState.mobilePrepared = true;
+        zoomState.desktopPrepared = false;
+        if (!wasMobilePrepared) afterResponsiveZoomChange(sessionName);
+      } else {
+        zoomState.mobilePrepared = true;
+        zoomState.desktopPrepared = false;
+        if (!wasMobilePrepared) afterResponsiveZoomChange(sessionName);
+      }
+      return;
+    }
+
+    zoomState.mobilePrepared = false;
+    const shouldRefresh = currentlyZoomed || zoomState.autoZoomed || !zoomState.desktopPrepared;
+    let zoomed;
+    try {
+      zoomed = await setWindowZoomed(sessionName, false);
+    } catch (_) {
+      return;
+    }
+    if (!isCurrentResponsiveZoomTarget(sessionName)) return;
+    if (!zoomed) {
+      zoomState.autoZoomed = false;
+      zoomState.wasZoomedBeforeAuto = false;
+      zoomState.desktopPrepared = true;
+      if (shouldRefresh) afterResponsiveZoomChange(sessionName);
+      return;
+    }
+    if (zoomState.autoZoomed && !zoomState.wasZoomedBeforeAuto) {
+      zoomState.autoZoomed = false;
+    }
+    zoomState.wasZoomedBeforeAuto = true;
+    zoomState.desktopPrepared = true;
+    if (shouldRefresh) afterResponsiveZoomChange(sessionName);
+  }
+
+  function isCurrentResponsiveZoomTarget(sessionName) {
+    return state.activeSession === sessionName
+      && Boolean(runtime.terminal)
+      && state.connectionStatus === "connected";
+  }
+
+  function afterResponsiveZoomChange(sessionName) {
+    requestFit({ settle: true });
+    schedulePaneLayoutRefresh(140);
+    if (state.activeSession === sessionName) focus();
+  }
+
   function proposedSize() {
     const fallback = { cols: 100, rows: 30 };
     if (!runtime.fitAddon) return fallback;
@@ -291,15 +539,30 @@ export function createTerminalController({
     });
   }
 
-  function fitAndResize() {
+  function fitTerminalViewport() {
     if (!runtime.fitAddon || !runtime.terminal) return;
     runtime.fitAddon.fit();
+  }
+
+  function fitAndResize() {
+    if (!runtime.fitAddon || !runtime.terminal) return;
+    fitTerminalViewport();
+    if (shouldDelayResizeUntilResponsiveZoom()) {
+      scheduleResponsiveZoom(0);
+      return;
+    }
     clearTimeout(runtime.resizeTimer);
     runtime.resizeTimer = window.setTimeout(() => {
       const { cols, rows } = proposedSize();
       sendResize(cols, rows);
       schedulePaneLayoutRefresh(90);
     }, 40);
+  }
+
+  function shouldDelayResizeUntilResponsiveZoom() {
+    const sessionName = state.activeSession;
+    if (!sessionName || state.connectionStatus !== "connected" || !isMobileViewport()) return false;
+    return !getResponsiveZoomState(sessionName).mobilePrepared;
   }
 
   function observeTerminalSize(element) {
@@ -309,6 +572,24 @@ export function createTerminalController({
     }
     runtime.resizeObserver = new ResizeObserver(() => requestFit());
     runtime.resizeObserver.observe(element);
+  }
+
+  function handleViewportChange() {
+    const sessionName = state.activeSession;
+    if (sessionName && !isMobileViewport()) {
+      getResponsiveZoomState(sessionName).desktopPrepared = false;
+    }
+    scheduleResponsiveZoom(0);
+    requestFit({ settle: true });
+  }
+
+  function handlePageActivation() {
+    const sessionName = state.activeSession;
+    if (!sessionName) return;
+    if (!isMobileViewport()) {
+      getResponsiveZoomState(sessionName).desktopPrepared = false;
+    }
+    scheduleResponsiveZoom(0);
   }
 
   function applyTheme(theme) {
@@ -326,6 +607,7 @@ export function createTerminalController({
     runtime.paneLayoutRefreshTimer = window.setTimeout(() => {
       void refreshPaneLayout();
     }, delay);
+    scheduleResponsiveZoom(delay + 60);
   }
 
   async function refreshPaneLayout(sessionName = state.activeSession) {
@@ -345,14 +627,26 @@ export function createTerminalController({
     return runtime.panesBySession.get(sessionName) || [];
   }
 
-  function prunePaneCache(sessionNames) {
+  function retainPaneCacheForSessions(sessionNames) {
     for (const sessionName of runtime.panesBySession.keys()) {
       if (!sessionNames.has(sessionName)) runtime.panesBySession.delete(sessionName);
+    }
+    for (const sessionName of runtime.responsiveZoomBySession.keys()) {
+      if (!sessionNames.has(sessionName)) runtime.responsiveZoomBySession.delete(sessionName);
     }
   }
 
   function dropPaneCache(sessionName) {
     runtime.panesBySession.delete(sessionName);
+    runtime.responsiveZoomBySession.delete(sessionName);
+  }
+
+  function noteManualPaneZoom(sessionName = state.activeSession) {
+    if (!sessionName) return;
+    const zoomState = getResponsiveZoomState(sessionName);
+    zoomState.autoZoomed = false;
+    zoomState.wasZoomedBeforeAuto = true;
+    void clearResponsiveWindowZoomed(sessionName);
   }
 
   return {
@@ -360,9 +654,12 @@ export function createTerminalController({
     close,
     dropPaneCache,
     focus,
+    handlePageActivation,
+    handleViewportChange,
     mount,
-    prunePaneCache,
+    noteManualPaneZoom,
     reconnect,
+    retainPaneCacheForSessions,
     requestFit,
     schedulePaneLayoutRefresh,
     sendInput,

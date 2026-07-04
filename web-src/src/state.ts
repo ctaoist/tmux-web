@@ -10,6 +10,8 @@ export function createInitialState() {
     bootError: "",
     sessions: [],
     activeSession: "",
+    windows: [],
+    activeWindowId: "",
     mode: "locked",
     connected: false,
     connectionStatus: "idle",

@@ -1,14 +1,27 @@
 use anyhow::{anyhow, Context, Result};
 use portable_pty::CommandBuilder;
-use serde::Serialize;
-use std::{ffi::OsString, path::PathBuf, sync::Arc};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use uuid::Uuid;
+
+const RESPONSIVE_LAYOUT_STORE_VERSION: u32 = 1;
+const RESPONSIVE_LAYOUT_STORE_FILE: &str = "tmux-web-responsive-layouts.json";
 
 #[derive(Clone, Debug)]
 pub struct TmuxConfig {
     tmux_path: Arc<OsString>,
     socket_path: Option<Arc<OsString>>,
+    zoom_lock: Arc<Mutex<()>>,
+    responsive_zoom_windows: Arc<Mutex<HashMap<String, DesktopLayoutSnapshot>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -20,7 +33,7 @@ pub struct TmuxSession {
     pub last_attached: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TmuxPane {
     pub id: String,
     pub left: u16,
@@ -30,11 +43,74 @@ pub struct TmuxPane {
     pub active: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct TmuxWindow {
+    pub id: String,
+    pub index: u32,
+    pub name: String,
+    pub active: bool,
+    pub panes: u32,
+    pub zoomed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct TmuxWindowEntry {
+    session_id: String,
+    window: TmuxWindow,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct DesktopLayoutSnapshot {
+    version: u32,
+    session_name: String,
+    session_id: String,
+    window_id: String,
+    window_index: u32,
+    window_name: String,
+    window_layout: String,
+    active_pane_id: String,
+    panes: Vec<TmuxPane>,
+    was_zoomed_before_auto: bool,
+    created_at_unix_secs: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DesktopLayoutStore {
+    version: u32,
+    snapshots: Vec<DesktopLayoutSnapshot>,
+}
+
+#[derive(Debug)]
+struct TmuxWindowZoomState {
+    zoomed: bool,
+}
+
+#[derive(Debug)]
+struct TmuxCurrentWindowState {
+    session_name: String,
+    session_id: String,
+    window_id: String,
+    window_index: u32,
+    window_name: String,
+    window_layout: String,
+    window_zoomed: bool,
+    active_pane_id: String,
+}
+
 impl TmuxConfig {
     pub fn new(tmux_path: PathBuf, socket_path: Option<PathBuf>) -> Self {
+        let responsive_zoom_windows = load_responsive_layout_store()
+            .map_err(|error| {
+                eprintln!("failed to load responsive layout store: {error:#}");
+                error
+            })
+            .unwrap_or_default();
+
         Self {
             tmux_path: Arc::new(tmux_path.into_os_string()),
             socket_path: socket_path.map(|path| Arc::new(path.into_os_string())),
+            zoom_lock: Arc::new(Mutex::new(())),
+            responsive_zoom_windows: Arc::new(Mutex::new(responsive_zoom_windows)),
         }
     }
 
@@ -100,11 +176,138 @@ impl TmuxConfig {
 
     pub async fn list_panes(&self, session_name: &str) -> Result<Vec<TmuxPane>> {
         validate_session_name(session_name)?;
+        self.list_panes_for_target(session_name).await
+    }
+
+    pub async fn list_windows(&self, session_name: &str) -> Result<Vec<TmuxWindow>> {
+        let entries = self.list_window_entries(session_name).await?;
+        Ok(entries.into_iter().map(|entry| entry.window).collect())
+    }
+
+    async fn list_window_entries(&self, session_name: &str) -> Result<Vec<TmuxWindowEntry>> {
+        validate_session_name(session_name)?;
+        let output = self
+            .command()
+            .arg("list-windows")
+            .arg("-t")
+            .arg(session_name)
+            .arg("-F")
+            .arg("#{session_id}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_zoomed_flag}")
+            .output()
+            .await
+            .context("failed to execute tmux list-windows")?;
+        ensure_success(output.status.success(), &output.stderr, "tmux list-windows")?;
+
+        let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
+        stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(parse_window_entry_line)
+            .collect()
+    }
+
+    pub async fn create_window(
+        &self,
+        session_name: &str,
+        requested_name: Option<String>,
+    ) -> Result<TmuxWindow> {
+        validate_session_name(session_name)?;
+        let name = requested_name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        if let Some(name) = &name {
+            validate_window_name(name)?;
+        }
+
+        let mut command = self.command();
+        command
+            .arg("new-window")
+            .arg("-d")
+            .arg("-P")
+            .arg("-F")
+            .arg("#{window_id}")
+            .arg("-t")
+            .arg(session_name);
+        if let Some(name) = &name {
+            command.arg("-n").arg(name);
+        }
+        let output = command
+            .output()
+            .await
+            .context("failed to execute tmux new-window")?;
+        ensure_success(output.status.success(), &output.stderr, "tmux new-window")?;
+
+        let window_id = String::from_utf8(output.stdout)
+            .context("tmux output was not UTF-8")?
+            .trim()
+            .to_string();
+        validate_window_id(&window_id)?;
+        self.select_window(session_name, &window_id).await
+    }
+
+    pub async fn select_window(&self, session_name: &str, window_id: &str) -> Result<TmuxWindow> {
+        validate_session_name(session_name)?;
+        let entry = self
+            .window_entry_in_session(session_name, window_id)
+            .await?;
+        let output = self
+            .command()
+            .arg("select-window")
+            .arg("-t")
+            .arg(&entry.window.id)
+            .output()
+            .await
+            .context("failed to execute tmux select-window")?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux select-window",
+        )?;
+
+        self.window_entry_in_session(session_name, window_id)
+            .await
+            .map(|entry| entry.window)
+    }
+
+    pub async fn kill_window(&self, session_name: &str, window_id: &str) -> Result<()> {
+        validate_session_name(session_name)?;
+        let entry = self
+            .window_entry_in_session(session_name, window_id)
+            .await?;
+        let output = self
+            .command()
+            .arg("kill-window")
+            .arg("-t")
+            .arg(&entry.window.id)
+            .output()
+            .await
+            .context("failed to execute tmux kill-window")?;
+        ensure_success(output.status.success(), &output.stderr, "tmux kill-window")?;
+        self.clear_responsive_layout_for_window(&entry.session_id, &entry.window.id)
+            .await
+    }
+
+    async fn window_entry_in_session(
+        &self,
+        session_name: &str,
+        window_id: &str,
+    ) -> Result<TmuxWindowEntry> {
+        validate_window_id(window_id)?;
+        self.list_window_entries(session_name)
+            .await?
+            .into_iter()
+            .find(|entry| entry.window.id == window_id)
+            .ok_or_else(|| {
+                anyhow!("tmux window {window_id} was not found in session {session_name}")
+            })
+    }
+
+    async fn list_panes_for_target(&self, target: &str) -> Result<Vec<TmuxPane>> {
         let output = self
             .command()
             .arg("list-panes")
             .arg("-t")
-            .arg(session_name)
+            .arg(target)
             .arg("-F")
             .arg("#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_active}")
             .output()
@@ -119,6 +322,192 @@ impl TmuxConfig {
             .filter_map(parse_pane_line)
             .collect();
         Ok(panes)
+    }
+
+    pub async fn window_zoomed(&self, session_name: &str) -> Result<bool> {
+        self.window_zoom_state(session_name)
+            .await
+            .map(|state| state.zoomed)
+    }
+
+    async fn window_zoom_state(&self, session_name: &str) -> Result<TmuxWindowZoomState> {
+        validate_session_name(session_name)?;
+        let output = self
+            .command()
+            .arg("display-message")
+            .arg("-p")
+            .arg("-t")
+            .arg(session_name)
+            .arg("#{window_id}\t#{window_zoomed_flag}")
+            .output()
+            .await
+            .context("failed to execute tmux display-message")?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux display-message",
+        )?;
+
+        let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
+        parse_window_zoom_state(&stdout)
+    }
+
+    pub async fn set_window_zoomed(&self, session_name: &str, zoomed: bool) -> Result<bool> {
+        let _guard = self.zoom_lock.lock().await;
+        self.set_window_zoomed_locked(session_name, zoomed).await
+    }
+
+    pub async fn set_responsive_window_zoomed(
+        &self,
+        session_name: &str,
+        zoomed: bool,
+    ) -> Result<bool> {
+        let _guard = self.zoom_lock.lock().await;
+        let window = self.current_window_state(session_name).await?;
+        let key = responsive_zoom_key(&window.session_id, &window.window_id);
+
+        if zoomed {
+            if window.window_zoomed {
+                return Ok(true);
+            }
+            let snapshot = self.desktop_layout_snapshot(&window).await?;
+            {
+                let mut snapshots = self.responsive_zoom_windows.lock().await;
+                snapshots.insert(key.clone(), snapshot);
+                persist_responsive_layout_store(&snapshots)?;
+            }
+            let zoomed = self.set_window_zoomed_locked(session_name, true).await?;
+            if !zoomed {
+                let mut snapshots = self.responsive_zoom_windows.lock().await;
+                snapshots.remove(&key);
+                persist_responsive_layout_store(&snapshots)?;
+            }
+            return Ok(zoomed);
+        }
+
+        let Some(snapshot) = self.responsive_zoom_windows.lock().await.get(&key).cloned() else {
+            return Ok(window.window_zoomed);
+        };
+
+        let mut zoomed = window.window_zoomed;
+        let restore_result = if !snapshot.was_zoomed_before_auto {
+            if window.window_zoomed {
+                zoomed = self.set_window_zoomed_locked(session_name, false).await?;
+            }
+            self.restore_desktop_layout(&snapshot).await
+        } else {
+            Ok(())
+        };
+
+        {
+            let mut snapshots = self.responsive_zoom_windows.lock().await;
+            snapshots.remove(&key);
+            persist_responsive_layout_store(&snapshots)?;
+        }
+        restore_result?;
+        Ok(zoomed)
+    }
+
+    pub async fn clear_responsive_window_zoomed(&self, session_name: &str) -> Result<()> {
+        let _guard = self.zoom_lock.lock().await;
+        let window = self.current_window_state(session_name).await?;
+        let key = responsive_zoom_key(&window.session_id, &window.window_id);
+        let mut snapshots = self.responsive_zoom_windows.lock().await;
+        snapshots.remove(&key);
+        persist_responsive_layout_store(&snapshots)?;
+        Ok(())
+    }
+
+    async fn current_window_state(&self, session_name: &str) -> Result<TmuxCurrentWindowState> {
+        validate_session_name(session_name)?;
+        let output = self
+            .command()
+            .arg("display-message")
+            .arg("-p")
+            .arg("-t")
+            .arg(session_name)
+            .arg("#{session_name}\t#{session_id}\t#{window_id}\t#{window_index}\t#{window_layout}\t#{window_zoomed_flag}\t#{pane_id}\t#{window_name}")
+            .output()
+            .await
+            .context("failed to execute tmux display-message")?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux display-message",
+        )?;
+
+        let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
+        parse_current_window_state(&stdout)
+    }
+
+    async fn desktop_layout_snapshot(
+        &self,
+        window: &TmuxCurrentWindowState,
+    ) -> Result<DesktopLayoutSnapshot> {
+        Ok(DesktopLayoutSnapshot {
+            version: RESPONSIVE_LAYOUT_STORE_VERSION,
+            session_name: window.session_name.clone(),
+            session_id: window.session_id.clone(),
+            window_id: window.window_id.clone(),
+            window_index: window.window_index,
+            window_name: window.window_name.clone(),
+            window_layout: window.window_layout.clone(),
+            active_pane_id: window.active_pane_id.clone(),
+            panes: self.list_panes_for_target(&window.window_id).await?,
+            was_zoomed_before_auto: window.window_zoomed,
+            created_at_unix_secs: now_unix_secs(),
+        })
+    }
+
+    async fn restore_desktop_layout(&self, snapshot: &DesktopLayoutSnapshot) -> Result<()> {
+        let output = self
+            .command()
+            .arg("select-layout")
+            .arg("-t")
+            .arg(&snapshot.window_id)
+            .arg(&snapshot.window_layout)
+            .output()
+            .await
+            .context("failed to execute tmux select-layout")?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux select-layout",
+        )?;
+
+        if snapshot.active_pane_id.is_empty() {
+            return Ok(());
+        }
+
+        let output = self
+            .command()
+            .arg("select-pane")
+            .arg("-t")
+            .arg(&snapshot.active_pane_id)
+            .output()
+            .await
+            .context("failed to execute tmux select-pane")?;
+        ensure_success(output.status.success(), &output.stderr, "tmux select-pane")
+    }
+
+    async fn set_window_zoomed_locked(&self, session_name: &str, zoomed: bool) -> Result<bool> {
+        let currently_zoomed = self.window_zoom_state(session_name).await?.zoomed;
+        if currently_zoomed == zoomed {
+            return Ok(currently_zoomed);
+        }
+
+        let output = self
+            .command()
+            .arg("resize-pane")
+            .arg("-Z")
+            .arg("-t")
+            .arg(session_name)
+            .output()
+            .await
+            .context("failed to execute tmux resize-pane")?;
+        ensure_success(output.status.success(), &output.stderr, "tmux resize-pane")?;
+
+        self.window_zoomed(session_name).await
     }
 
     pub async fn create_session(&self, requested_name: Option<String>) -> Result<TmuxSession> {
@@ -148,6 +537,7 @@ impl TmuxConfig {
 
     pub async fn kill_session(&self, name: &str) -> Result<()> {
         validate_session_name(name)?;
+        let session_id = self.session_id(name).await.ok();
         let output = self
             .command()
             .arg("kill-session")
@@ -156,7 +546,9 @@ impl TmuxConfig {
             .output()
             .await
             .context("failed to execute tmux kill-session")?;
-        ensure_success(output.status.success(), &output.stderr, "tmux kill-session")
+        ensure_success(output.status.success(), &output.stderr, "tmux kill-session")?;
+        self.clear_responsive_layouts_for_session(name, session_id.as_deref())
+            .await
     }
 
     pub async fn rename_session(&self, old_name: &str, new_name: &str) -> Result<TmuxSession> {
@@ -183,6 +575,59 @@ impl TmuxConfig {
             .find(|session| session.name == new_name)
             .ok_or_else(|| anyhow!("session was renamed but not found in tmux list-sessions"))
     }
+
+    async fn clear_responsive_layouts_for_session(
+        &self,
+        session_name: &str,
+        session_id: Option<&str>,
+    ) -> Result<()> {
+        let mut snapshots = self.responsive_zoom_windows.lock().await;
+        let before = snapshots.len();
+        snapshots.retain(|_, snapshot| {
+            snapshot.session_name != session_name
+                && session_id.map_or(true, |session_id| snapshot.session_id != session_id)
+        });
+        if snapshots.len() != before {
+            persist_responsive_layout_store(&snapshots)?;
+        }
+        Ok(())
+    }
+
+    async fn clear_responsive_layout_for_window(
+        &self,
+        session_id: &str,
+        window_id: &str,
+    ) -> Result<()> {
+        let mut snapshots = self.responsive_zoom_windows.lock().await;
+        if snapshots
+            .remove(&responsive_zoom_key(session_id, window_id))
+            .is_some()
+        {
+            persist_responsive_layout_store(&snapshots)?;
+        }
+        Ok(())
+    }
+
+    async fn session_id(&self, session_name: &str) -> Result<String> {
+        validate_session_name(session_name)?;
+        let output = self
+            .command()
+            .arg("display-message")
+            .arg("-p")
+            .arg("-t")
+            .arg(session_name)
+            .arg("#{session_id}")
+            .output()
+            .await
+            .context("failed to execute tmux display-message")?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux display-message",
+        )?;
+        let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
+        Ok(stdout.trim().to_string())
+    }
 }
 
 pub fn validate_session_name(name: &str) -> Result<()> {
@@ -196,6 +641,29 @@ pub fn validate_session_name(name: &str) -> Result<()> {
         return Err(anyhow!(
             "session name may only contain letters, numbers, '.', '_' and '-'"
         ));
+    }
+    Ok(())
+}
+
+fn validate_window_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 32 {
+        return Err(anyhow!("window id must be 1-32 characters"));
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '@' | '$' | '-' | '_' | '.'))
+    {
+        return Err(anyhow!("window id contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn validate_window_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 80 {
+        return Err(anyhow!("window name must be 1-80 characters"));
+    }
+    if name.contains('\0') || name.contains('\n') || name.contains('\r') {
+        return Err(anyhow!("window name contains unsupported characters"));
     }
     Ok(())
 }
@@ -235,6 +703,163 @@ fn parse_pane_line(line: &str) -> Option<TmuxPane> {
     })
 }
 
+fn parse_window_entry_line(line: &str) -> Result<TmuxWindowEntry> {
+    let mut parts = line.splitn(7, '\t');
+    let session_id = required_part(&mut parts, "session_id")?;
+    let id = required_part(&mut parts, "window_id")?;
+    let index = parse_u32(Some(&required_part(&mut parts, "window_index")?));
+    let name = required_part(&mut parts, "window_name")?;
+    let active = parse_bool_flag(&required_part(&mut parts, "window_active")?)?;
+    let panes = parse_u32(Some(&required_part(&mut parts, "window_panes")?));
+    let zoomed = parse_window_zoomed_flag(&required_part(&mut parts, "window_zoomed_flag")?)?;
+
+    Ok(TmuxWindowEntry {
+        session_id,
+        window: TmuxWindow {
+            id,
+            index,
+            name,
+            active,
+            panes,
+            zoomed,
+        },
+    })
+}
+
+fn parse_window_zoom_state(value: &str) -> Result<TmuxWindowZoomState> {
+    let mut parts = value.trim().splitn(2, '\t');
+    let _id = parts
+        .next()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| anyhow!("tmux window_id output was empty"))?;
+    let zoomed = parse_window_zoomed_flag(parts.next().unwrap_or_default())?;
+    Ok(TmuxWindowZoomState { zoomed })
+}
+
+fn parse_current_window_state(value: &str) -> Result<TmuxCurrentWindowState> {
+    let mut parts = value.trim().splitn(8, '\t');
+    let session_name = required_part(&mut parts, "session_name")?;
+    let session_id = required_part(&mut parts, "session_id")?;
+    let window_id = required_part(&mut parts, "window_id")?;
+    let window_index = parse_u32(Some(&required_part(&mut parts, "window_index")?));
+    let window_layout = required_part(&mut parts, "window_layout")?;
+    let window_zoomed =
+        parse_window_zoomed_flag(&required_part(&mut parts, "window_zoomed_flag")?)?;
+    let active_pane_id = required_part(&mut parts, "pane_id")?;
+    let window_name = parts.next().unwrap_or_default().to_string();
+
+    Ok(TmuxCurrentWindowState {
+        session_name,
+        session_id,
+        window_id,
+        window_index,
+        window_name,
+        window_layout,
+        window_zoomed,
+        active_pane_id,
+    })
+}
+
+fn parse_window_zoomed_flag(value: &str) -> Result<bool> {
+    parse_bool_flag(value).map_err(|_| {
+        anyhow!(
+            "unexpected tmux window_zoomed_flag output: {:?}",
+            value.trim()
+        )
+    })
+}
+
+fn parse_bool_flag(value: &str) -> Result<bool> {
+    match value.trim() {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        output => Err(anyhow!("unexpected tmux boolean output: {output:?}")),
+    }
+}
+
+fn required_part<'a>(parts: &mut impl Iterator<Item = &'a str>, name: &str) -> Result<String> {
+    parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("tmux {name} output was empty"))
+}
+
+fn responsive_zoom_key(session_name: &str, window_id: &str) -> String {
+    format!("{session_name}\t{window_id}")
+}
+
+fn responsive_layout_store_path() -> PathBuf {
+    std::env::temp_dir().join(RESPONSIVE_LAYOUT_STORE_FILE)
+}
+
+fn load_responsive_layout_store() -> Result<HashMap<String, DesktopLayoutSnapshot>> {
+    let path = responsive_layout_store_path();
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    if contents.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let store: DesktopLayoutStore = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    let snapshots = store
+        .snapshots
+        .into_iter()
+        .map(|snapshot| {
+            (
+                responsive_zoom_key(&snapshot.session_id, &snapshot.window_id),
+                snapshot,
+            )
+        })
+        .collect();
+    Ok(snapshots)
+}
+
+fn persist_responsive_layout_store(
+    snapshots: &HashMap<String, DesktopLayoutSnapshot>,
+) -> Result<()> {
+    let path = responsive_layout_store_path();
+    persist_responsive_layout_store_to_path(&path, snapshots)
+}
+
+fn persist_responsive_layout_store_to_path(
+    path: &Path,
+    snapshots: &HashMap<String, DesktopLayoutSnapshot>,
+) -> Result<()> {
+    if snapshots.is_empty() {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
+
+    let store = DesktopLayoutStore {
+        version: RESPONSIVE_LAYOUT_STORE_VERSION,
+        snapshots: snapshots.values().cloned().collect(),
+    };
+    let contents = serde_json::to_string_pretty(&store).context("failed to encode layout store")?;
+    let tmp_path = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    fs::write(&tmp_path, contents)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn ensure_success(success: bool, stderr: &[u8], command: &str) -> Result<()> {
     if success {
         return Ok(());
@@ -267,5 +892,101 @@ mod tests {
         assert_eq!(pane.width, 79);
         assert_eq!(pane.height, 24);
         assert!(pane.active);
+    }
+
+    #[test]
+    fn parses_tmux_window_zoomed_flag() {
+        assert!(!parse_window_zoomed_flag("0\n").expect("zoom flag should parse"));
+        assert!(parse_window_zoomed_flag(" 1 ").expect("zoom flag should parse"));
+        assert!(parse_window_zoomed_flag("yes").is_err());
+    }
+
+    #[test]
+    fn parses_tmux_window_zoom_state() {
+        let state = parse_window_zoom_state("@2\t1\n").expect("zoom state should parse");
+        assert!(state.zoomed);
+        assert!(parse_window_zoom_state("\t1").is_err());
+    }
+
+    #[test]
+    fn parses_tmux_window_entry_line() {
+        let entry = parse_window_entry_line("$1\t@2\t3\tshell\t1\t4\t0")
+            .expect("window entry should parse");
+
+        assert_eq!(entry.session_id, "$1");
+        assert_eq!(entry.window.id, "@2");
+        assert_eq!(entry.window.index, 3);
+        assert_eq!(entry.window.name, "shell");
+        assert!(entry.window.active);
+        assert_eq!(entry.window.panes, 4);
+        assert!(!entry.window.zoomed);
+        assert!(parse_window_entry_line("$1\t@2\t3\tshell\tactive\t4\t0").is_err());
+    }
+
+    #[test]
+    fn parses_tmux_current_window_state() {
+        let state = parse_current_window_state("dev\t$1\t@2\t3\tb25d,120x30,0,0,0\t0\t%4\tshell\n")
+            .expect("current window state should parse");
+
+        assert_eq!(state.session_name, "dev");
+        assert_eq!(state.session_id, "$1");
+        assert_eq!(state.window_id, "@2");
+        assert_eq!(state.window_index, 3);
+        assert_eq!(state.window_layout, "b25d,120x30,0,0,0");
+        assert!(!state.window_zoomed);
+        assert_eq!(state.active_pane_id, "%4");
+        assert_eq!(state.window_name, "shell");
+    }
+
+    #[test]
+    fn persists_responsive_layout_store() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("layouts.json");
+        let snapshot = DesktopLayoutSnapshot {
+            version: RESPONSIVE_LAYOUT_STORE_VERSION,
+            session_name: "dev".to_string(),
+            session_id: "$1".to_string(),
+            window_id: "@2".to_string(),
+            window_index: 1,
+            window_name: "shell".to_string(),
+            window_layout: "layout".to_string(),
+            active_pane_id: "%3".to_string(),
+            panes: vec![TmuxPane {
+                id: "%3".to_string(),
+                left: 0,
+                top: 0,
+                width: 80,
+                height: 24,
+                active: true,
+            }],
+            was_zoomed_before_auto: false,
+            created_at_unix_secs: 42,
+        };
+        let mut snapshots = HashMap::new();
+        snapshots.insert(responsive_zoom_key("$1", "@2"), snapshot);
+
+        persist_responsive_layout_store_to_path(&path, &snapshots)
+            .expect("layout store should persist");
+        let contents = fs::read_to_string(path).expect("layout store should be readable");
+        let store: DesktopLayoutStore =
+            serde_json::from_str(&contents).expect("layout store should be JSON");
+
+        assert_eq!(store.version, RESPONSIVE_LAYOUT_STORE_VERSION);
+        assert_eq!(store.snapshots.len(), 1);
+        assert_eq!(store.snapshots[0].session_name, "dev");
+        assert_eq!(store.snapshots[0].window_id, "@2");
+        assert_eq!(store.snapshots[0].panes[0].id, "%3");
+    }
+
+    #[test]
+    fn removes_empty_responsive_layout_store() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("layouts.json");
+        fs::write(&path, "{}").expect("layout store placeholder should be writable");
+
+        persist_responsive_layout_store_to_path(&path, &HashMap::new())
+            .expect("empty layout store should remove the file");
+
+        assert!(!path.exists());
     }
 }

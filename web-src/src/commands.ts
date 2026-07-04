@@ -9,7 +9,7 @@ export type CommandItem = {
 
 export const LOCKED_COMMAND_ITEMS: CommandItem[] = [
   { key: "Ctrl+g", label: "Unlock", action: "toggle-mode" },
-  { key: "Ctrl+b", label: "Prefix", action: "send-prefix" },
+  { key: "q", label: "Pane list", action: "pane-list" },
 ];
 
 export const UNLOCKED_COMMAND_ITEMS: CommandItem[] = [
@@ -17,20 +17,20 @@ export const UNLOCKED_COMMAND_ITEMS: CommandItem[] = [
   { key: "s", label: "Session", menu: "session" },
   { key: "p", label: "Pane", menu: "pane" },
   { key: "w", label: "Window", menu: "window" },
-  { key: "b", label: "Prefix", action: "send-prefix" },
+  { key: "q", label: "Pane list", action: "pane-list" },
   { key: "?", label: "Help", menu: "help" },
 ];
 
 export const COMMAND_MENUS = {
   session: {
     label: "Session",
-    subtitle: "Manage browser tabs backed by tmux sessions.",
+    subtitle: "Manage the tmux session selected above the window tabs.",
     actions: [
-      { id: "session-new", key: "n", label: "New session", detail: "Create a session and open it as a tab" },
+      { id: "session-new", key: "n", label: "New session", detail: "Create a tmux session" },
       { id: "session-rename", key: "r", label: "Rename session", detail: "Rename the active tmux session" },
       { id: "session-kill", key: "x", label: "Kill session", detail: "Close the active tmux session", danger: true },
-      { id: "session-prev", key: "[", label: "Previous tab", detail: "Switch to the previous session tab" },
-      { id: "session-next", key: "]", label: "Next tab", detail: "Switch to the next session tab" },
+      { id: "session-prev", key: "[", label: "Previous session", detail: "Switch to the previous tmux session" },
+      { id: "session-next", key: "]", label: "Next session", detail: "Switch to the next tmux session" },
       { id: "session-refresh", key: "u", label: "Refresh", detail: "Reload sessions from tmux" },
     ],
   },
@@ -64,7 +64,7 @@ export const COMMAND_MENUS = {
     label: "Help",
     subtitle: "Command mode is a web layer; Locked mode sends keys to tmux.",
     actions: [
-      { id: "help-session", key: "s", label: "Session menu", detail: "Create, rename, kill, and switch session tabs" },
+      { id: "help-session", key: "s", label: "Session menu", detail: "Create, rename, kill, and switch sessions" },
       { id: "help-pane", key: "p", label: "Pane menu", detail: "Split, focus, zoom, layout, and kill panes" },
       { id: "help-window", key: "w", label: "Window menu", detail: "Create, rename, switch, and kill tmux windows" },
       { id: "help-lock", key: "Ctrl+g", label: "Lock", detail: "Return all keyboard input to tmux" },

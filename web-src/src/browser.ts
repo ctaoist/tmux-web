@@ -33,6 +33,13 @@ export function installViewportSizeSync(onChange) {
   };
 }
 
+export function isMobileViewport() {
+  const width = window.visualViewport?.width || window.innerWidth;
+  const coarsePointer = Boolean(window.matchMedia?.("(pointer: coarse)").matches);
+  const mobileUserAgent = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  return (coarsePointer && width < 600) || mobileUserAgent;
+}
+
 export function installContextMenuSuppression() {
   BROWSER_CONTEXT_MENU_EVENTS.forEach((eventType) => {
     window.addEventListener(eventType, suppressBrowserContextMenu, { capture: true, passive: false });

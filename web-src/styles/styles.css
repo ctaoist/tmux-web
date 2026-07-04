@@ -46,8 +46,12 @@
   --viewport-top: 0px;
   --viewport-width: 100vw;
   --viewport-height: 100vh;
+  --sessionbar-height: 34px;
   --tabbar-height: 36px;
+  --nav-height: calc(var(--sessionbar-height) + var(--tabbar-height));
+  --mobile-sessionbar-height: 34px;
   --mobile-tabbar-height: 36px;
+  --mobile-nav-height: calc(var(--mobile-sessionbar-height) + var(--mobile-tabbar-height));
   --mobile-command-bar-height: 54px;
   --safe-area-top: env(safe-area-inset-top, 0px);
   --safe-area-right: env(safe-area-inset-right, 0px);
@@ -227,7 +231,7 @@ button {
 .workspace {
   position: relative;
   display: grid;
-  grid-template-rows: var(--tabbar-height) minmax(0, 1fr) 0 38px;
+  grid-template-rows: var(--nav-height) minmax(0, 1fr) 0 38px;
   width: var(--viewport-width);
   height: var(--viewport-height);
   padding:
@@ -239,9 +243,18 @@ button {
 }
 
 .workspace.sticky-keys-open {
-  grid-template-rows: var(--tabbar-height) minmax(0, 1fr) auto 38px;
+  grid-template-rows: var(--nav-height) minmax(0, 1fr) auto 38px;
 }
 
+.nav-bars {
+  display: grid;
+  grid-template-rows: var(--sessionbar-height) var(--tabbar-height);
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+}
+
+.sessionbar,
 .tabbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -249,6 +262,34 @@ button {
   min-width: 0;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
+}
+
+.sessionbar {
+  border-bottom-color: var(--line-soft);
+  background: var(--panel-2);
+}
+
+.session-select-wrap {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  padding: 0 8px;
+}
+
+.session-select {
+  min-width: 0;
+  width: min(360px, 100%);
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 28px 0 9px;
+  background: var(--input-bg);
+  color: var(--text);
+  outline: none;
+}
+
+.session-select:focus {
+  border-color: var(--cyan);
 }
 
 .tabs {
@@ -260,7 +301,7 @@ button {
   -webkit-overflow-scrolling: touch;
 }
 
-.session-tab {
+.window-tab {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -275,13 +316,13 @@ button {
   color: var(--muted);
 }
 
-.session-tab.active {
+.window-tab.active {
   border-bottom-color: var(--amber);
   background: var(--panel-active);
   color: var(--text);
 }
 
-.session-tab-main {
+.window-tab-main {
   display: grid;
   grid-template-columns: minmax(4ch, auto) auto;
   align-items: center;
@@ -295,7 +336,7 @@ button {
   cursor: pointer;
 }
 
-.session-name {
+.window-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -303,7 +344,7 @@ button {
   text-align: left;
 }
 
-.session-meta {
+.window-meta {
   color: var(--cyan);
   font-size: 11px;
 }
@@ -342,6 +383,17 @@ button {
   background: var(--panel-2);
   color: var(--muted);
   cursor: pointer;
+}
+
+.icon-button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.danger-button:not(:disabled):hover {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--red);
 }
 
 .terminal-stage {
@@ -712,7 +764,7 @@ kbd {
 
 @media (max-width: 680px) {
   .workspace {
-    grid-template-rows: var(--mobile-tabbar-height) minmax(0, 1fr) 0;
+    grid-template-rows: var(--mobile-nav-height) minmax(0, 1fr) 0;
     padding:
       var(--safe-area-top)
       var(--safe-area-right)
@@ -725,7 +777,7 @@ kbd {
   }
 
   .workspace.sticky-keys-open {
-    grid-template-rows: var(--mobile-tabbar-height) minmax(0, 1fr) auto;
+    grid-template-rows: var(--mobile-nav-height) minmax(0, 1fr) auto;
   }
 
   .tab-actions {
@@ -738,20 +790,38 @@ kbd {
     min-width: 0;
   }
 
-  .tabbar {
+  .nav-bars {
     position: relative;
     z-index: 12;
-    min-height: var(--mobile-tabbar-height);
+    grid-template-rows: var(--mobile-sessionbar-height) var(--mobile-tabbar-height);
+    min-height: var(--mobile-nav-height);
+  }
+
+  .sessionbar,
+  .tabbar {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .session-tab {
+  .window-tab {
     min-width: 112px;
     height: calc(var(--mobile-tabbar-height) - 1px);
   }
 
-  .session-tab-main {
+  .session-select-wrap {
+    padding: 0 6px;
+  }
+
+  .session-select {
+    width: 100%;
+    height: 28px;
+  }
+
+  .window-tab-main {
     padding-left: 10px;
+  }
+
+  .terminal .xterm {
+    padding: 0;
   }
 
   .close-tab {
@@ -860,7 +930,7 @@ kbd {
       560px,
       calc(
         var(--viewport-height)
-        - var(--mobile-tabbar-height)
+        - var(--mobile-nav-height)
         - var(--mobile-command-bar-height)
         - var(--safe-area-top)
         - var(--safe-area-bottom)

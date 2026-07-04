@@ -54,7 +54,7 @@ export function createActions({ state, setState, getTerminal }) {
     const data = await authorizedApi("/api/sessions");
     const sessions = Array.isArray(data.sessions) ? data.sessions : [];
     const sessionNames = new Set(sessions.map((session) => session.name));
-    getTerminal()?.prunePaneCache(sessionNames);
+    getTerminal()?.retainPaneCacheForSessions(sessionNames);
 
     let activeSession = state.activeSession;
     if (!activeSession && sessions.length) {
@@ -65,6 +65,20 @@ export function createActions({ state, setState, getTerminal }) {
     }
 
     setState({ sessions, activeSession });
+    await refreshWindows(activeSession);
+  }
+
+  async function refreshWindows(sessionName = state.activeSession) {
+    if (!sessionName) {
+      setState({ windows: [], activeWindowId: "" });
+      return [];
+    }
+
+    const data = await authorizedApi(`/api/sessions/${encodeURIComponent(sessionName)}/windows`);
+    const windows = Array.isArray(data.windows) ? data.windows : [];
+    const activeWindowId = windows.find((window) => window.active)?.id || windows[0]?.id || "";
+    setState({ windows, activeWindowId });
+    return windows;
   }
 
   async function createSession() {
@@ -76,8 +90,23 @@ export function createActions({ state, setState, getTerminal }) {
       body: JSON.stringify({ name: name.trim() || null }),
     });
     await refreshSessions();
-    setActiveSession(data.session.name);
+    await setActiveSession(data.session.name);
     return data.session;
+  }
+
+  async function createWindow() {
+    if (!state.activeSession) return null;
+    const name = window.prompt("Window name", "");
+    if (name === null) return null;
+
+    const data = await authorizedApi(`/api/sessions/${encodeURIComponent(state.activeSession)}/windows`, {
+      method: "POST",
+      body: JSON.stringify({ name: name.trim() || null }),
+    });
+    await refreshSessions();
+    await refreshWindows(state.activeSession);
+    getTerminal()?.schedulePaneLayoutRefresh(120);
+    return data.window;
   }
 
   async function killSession(name = state.activeSession) {
@@ -88,9 +117,23 @@ export function createActions({ state, setState, getTerminal }) {
     getTerminal()?.dropPaneCache(name);
     if (state.activeSession === name) {
       getTerminal()?.close({ disposeTerminal: true, intentional: true });
-      setState("activeSession", "");
+      setState({ activeSession: "", activeWindowId: "", windows: [] });
     }
     await refreshSessions();
+  }
+
+  async function killWindow(windowId = state.activeWindowId) {
+    if (!state.activeSession || !windowId) return;
+    const tmuxWindow = state.windows.find((item) => item.id === windowId);
+    const label = tmuxWindow ? `${tmuxWindow.index}:${tmuxWindow.name}` : windowId;
+    if (!window.confirm(`Kill tmux window "${label}"?`)) return;
+
+    await authorizedApi(
+      `/api/sessions/${encodeURIComponent(state.activeSession)}/windows/${encodeURIComponent(windowId)}`,
+      { method: "DELETE" },
+    );
+    await refreshSessions();
+    getTerminal()?.schedulePaneLayoutRefresh(120);
   }
 
   async function renameActiveSession() {
@@ -105,12 +148,25 @@ export function createActions({ state, setState, getTerminal }) {
     });
     getTerminal()?.dropPaneCache(oldName);
     await refreshSessions();
-    setActiveSession(data.session.name);
+    await setActiveSession(data.session.name);
   }
 
-  function setActiveSession(name) {
+  async function setActiveSession(name) {
     if (state.activeSession === name) return;
-    setState({ activeSession: name, activeMenu: null });
+    setState({ activeSession: name, activeMenu: null, windows: [], activeWindowId: "" });
+    await refreshWindows(name);
+  }
+
+  async function setActiveWindow(windowId) {
+    if (!state.activeSession || !windowId || state.activeWindowId === windowId) return;
+    const data = await authorizedApi(
+      `/api/sessions/${encodeURIComponent(state.activeSession)}/windows/${encodeURIComponent(windowId)}`,
+      { method: "PUT" },
+    );
+    setState({ activeWindowId: data.window?.id || windowId, activeMenu: null });
+    await refreshWindows(state.activeSession);
+    getTerminal()?.schedulePaneLayoutRefresh(120);
+    getTerminal()?.requestFit({ settle: true });
   }
 
   function sendInput(data) {
@@ -229,6 +285,10 @@ export function createActions({ state, setState, getTerminal }) {
       sendInput(TMUX_PREFIX);
       lockCommandMode();
     }
+    if (action === "pane-list") {
+      sendTmuxPrefixKey("q");
+      lockCommandMode();
+    }
   }
 
   function toggleMode() {
@@ -265,16 +325,19 @@ export function createActions({ state, setState, getTerminal }) {
     else if (command === "pane-split-down") sendTmuxPrefixKey("\"");
     else if (command === "pane-next") sendTmuxPrefixKey("o");
     else if (command === "pane-last") sendTmuxPrefixKey(";");
-    else if (command === "pane-zoom") sendTmuxPrefixKey("z");
+    else if (command === "pane-zoom") {
+      getTerminal()?.noteManualPaneZoom();
+      sendTmuxPrefixKey("z");
+    }
     else if (command === "pane-layout") sendTmuxPrefixKey(" ");
     else if (command === "pane-kill") sendInput(`${TMUX_PREFIX}xy`);
-    else if (command === "window-new") sendTmuxPrefixKey("c");
+    else if (command === "window-new") await createWindow();
     else if (command === "window-rename") sendTmuxPrefixKey(",");
     else if (command === "window-tree") sendTmuxPrefixKey("w");
-    else if (command === "window-next") sendTmuxPrefixKey("n");
-    else if (command === "window-prev") sendTmuxPrefixKey("p");
+    else if (command === "window-next") await switchWindow(1);
+    else if (command === "window-prev") await switchWindow(-1);
     else if (command === "window-last") sendTmuxPrefixKey("l");
-    else if (command === "window-kill") sendInput(`${TMUX_PREFIX}&y`);
+    else if (command === "window-kill") await killWindow();
     else if (command === "help-session") return openCommandMenu("session");
     else if (command === "help-pane") return openCommandMenu("pane");
     else if (command === "help-window") return openCommandMenu("window");
@@ -295,7 +358,14 @@ export function createActions({ state, setState, getTerminal }) {
     if (!state.sessions.length) return;
     const index = state.sessions.findIndex((session) => session.name === state.activeSession);
     const nextIndex = (index + direction + state.sessions.length) % state.sessions.length;
-    setActiveSession(state.sessions[nextIndex].name);
+    void setActiveSession(state.sessions[nextIndex].name);
+  }
+
+  async function switchWindow(direction) {
+    if (!state.windows.length) return;
+    const index = state.windows.findIndex((window) => window.id === state.activeWindowId);
+    const nextIndex = (Math.max(index, 0) + direction + state.windows.length) % state.windows.length;
+    await setActiveWindow(state.windows[nextIndex].id);
   }
 
   return {
@@ -304,17 +374,21 @@ export function createActions({ state, setState, getTerminal }) {
     bootstrap,
     closeCommandMenu,
     createSession,
+    createWindow,
     executeMenuAction,
     handleAuthExpired,
     handleGlobalKeyEvent,
     handleStickyKey,
     handleTerminalKeyEvent,
     killSession,
+    killWindow,
     login,
     openCommandMenu,
     refreshSessions,
+    refreshWindows,
     runTopLevelCommand,
     setActiveSession,
+    setActiveWindow,
     toggleStickyKeys,
   };
 }
