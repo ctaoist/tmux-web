@@ -6,6 +6,7 @@ import { isMobileViewport } from "../browser";
 import { installTerminalSelectionCopy } from "./selection";
 import { TERMINAL_THEMES } from "./themes";
 import { installTerminalTouchScroll } from "./touch";
+import { createTrzszBridge, generateTransferId } from "./trzsz";
 
 type TmuxWebSocket = WebSocket & {
   _tmuxWebIntentionalClose?: boolean;
@@ -25,6 +26,7 @@ export function createTerminalController({
   const runtime = {
     terminalElement: null,
     terminal: null,
+    trzszBridge: null,
     canvasAddon: null,
     fitAddon: null,
     socket: null,
@@ -33,6 +35,7 @@ export function createTerminalController({
     controlRequests: new Map(),
     nextControlRequestId: 1,
     resizeObserver: null,
+    dragDropController: null,
     touchScrollController: null,
     selectionCopyController: null,
     panesBySession: new Map(),
@@ -100,6 +103,7 @@ export function createTerminalController({
     runtime.canvasAddon = new CanvasAddon();
     runtime.terminal.loadAddon(runtime.canvasAddon);
     observeTerminalSize(terminalElement);
+    runtime.dragDropController = installTrzszDragDrop(terminalElement);
     runtime.touchScrollController = installTerminalTouchScroll(terminalElement);
     runtime.selectionCopyController = installTerminalSelectionCopy({
       terminalElement,
@@ -113,6 +117,11 @@ export function createTerminalController({
     runtime.terminal.onData((data) => {
       if (state.mode === "locked") {
         sendInput(applyStickyModifiers(data));
+      }
+    });
+    runtime.terminal.onBinary((data) => {
+      if (state.mode === "locked") {
+        sendBinaryInput(data);
       }
     });
     requestAnimationFrame(() => {
@@ -147,14 +156,23 @@ export function createTerminalController({
     fitTerminalViewport();
     const { cols, rows } = proposedSize();
     const protocol = location.protocol === "https:" ? "wss" : "ws";
+    const transferId = generateTransferId();
     const params = new URLSearchParams({
       session: sessionName,
       cols: String(cols),
       rows: String(rows),
+      transfer_id: transferId,
     });
     const socket = new WebSocket(`${protocol}://${location.host}/ws/terminal?${params}`) as TmuxWebSocket;
     socket.binaryType = "arraybuffer";
     runtime.socket = socket;
+    runtime.trzszBridge = createTrzszBridge({
+      transferId,
+      writeToTerminal,
+      sendTerminalInput,
+      showMessage: showTransientOverlay,
+      getTerminalColumns: () => runtime.terminal?.cols || 80,
+    });
     runtime.socketSessionName = sessionName;
     runtime.attachedClientKind = "";
     runtime.lastResizeCols = 0;
@@ -170,10 +188,10 @@ export function createTerminalController({
       if (socket !== runtime.socket) return;
       if (!runtime.terminal) return;
       if (event.data instanceof ArrayBuffer) {
-        runtime.terminal.write(new Uint8Array(event.data));
+        processServerOutput(event.data);
       } else {
         if (handleTerminalControlMessage(event.data)) return;
-        runtime.terminal.write(event.data);
+        processServerOutput(event.data);
       }
     });
 
@@ -187,6 +205,8 @@ export function createTerminalController({
       if (socket !== runtime.socket) return;
       runtime.socketSessionName = "";
       runtime.attachedClientKind = "";
+      runtime.trzszBridge?.stop();
+      runtime.trzszBridge = null;
       if (socket._tmuxWebIntentionalClose) return;
       rejectTerminalControlRequests(new Error("terminal websocket closed"));
       setState({
@@ -231,7 +251,9 @@ export function createTerminalController({
       runtime.socket._tmuxWebIntentionalClose = intentional;
       runtime.socket.close();
     }
+    runtime.trzszBridge?.stop();
     runtime.socket = null;
+    runtime.trzszBridge = null;
     runtime.socketSessionName = "";
     runtime.attachedClientKind = "";
     rejectTerminalControlRequests(new Error("terminal websocket closed"));
@@ -254,6 +276,10 @@ export function createTerminalController({
     if (disposeTerminal && runtime.resizeObserver) {
       runtime.resizeObserver.disconnect();
       runtime.resizeObserver = null;
+    }
+    if (disposeTerminal && runtime.dragDropController) {
+      runtime.dragDropController.abort();
+      runtime.dragDropController = null;
     }
     if (disposeTerminal && runtime.touchScrollController) {
       runtime.touchScrollController.abort();
@@ -287,7 +313,9 @@ export function createTerminalController({
       runtime.socket._tmuxWebIntentionalClose = true;
       runtime.socket.close();
     }
+    runtime.trzszBridge?.stop();
     runtime.socket = null;
+    runtime.trzszBridge = null;
     runtime.socketSessionName = "";
     runtime.attachedClientKind = "";
     beginConnection(state.activeSession);
@@ -335,8 +363,71 @@ export function createTerminalController({
 
   function sendInput(data) {
     if (!data) return;
-    if (!runtime.socket || runtime.socket.readyState !== WebSocket.OPEN) return;
-    runtime.socket.send(JSON.stringify({ type: "input", data }));
+    if (runtime.trzszBridge) {
+      runtime.trzszBridge.processTerminalInput(data);
+    } else {
+      sendTerminalInput(data);
+    }
+  }
+
+  function sendBinaryInput(data) {
+    if (!data) return;
+    runtime.trzszBridge?.processBinaryInput(data);
+  }
+
+  function sendTerminalInput(data) {
+    const socket = runtime.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (typeof data === "string") {
+      socket.send(JSON.stringify({ type: "input", data }));
+    } else {
+      socket.send(data);
+    }
+  }
+
+  function processServerOutput(data) {
+    if (runtime.trzszBridge) {
+      runtime.trzszBridge.processServerOutput(data);
+    } else {
+      writeToTerminal(data);
+    }
+  }
+
+  function writeToTerminal(data) {
+    const terminal = runtime.terminal;
+    if (!terminal) return;
+    if (typeof data === "string") {
+      terminal.write(data);
+    } else if (data instanceof Uint8Array) {
+      terminal.write(data);
+    } else if (data instanceof ArrayBuffer) {
+      terminal.write(new Uint8Array(data));
+    } else if (data instanceof Blob) {
+      data.arrayBuffer().then((buffer) => {
+        if (runtime.terminal === terminal) {
+          terminal.write(new Uint8Array(buffer));
+        }
+      });
+    }
+  }
+
+  function installTrzszDragDrop(element) {
+    const controller = new AbortController();
+    const options = { signal: controller.signal };
+    element.addEventListener("dragover", (event) => {
+      if (!runtime.trzszBridge) return;
+      event.preventDefault();
+    }, options);
+    element.addEventListener("drop", (event) => {
+      const items = event.dataTransfer?.items;
+      if (!runtime.trzszBridge || !items?.length) return;
+      event.preventDefault();
+      runtime.trzszBridge.uploadFiles(items).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        showTransientOverlay(message || "Upload failed", 1600);
+      });
+    }, options);
+    return controller;
   }
 
   function sendClientActivity() {
@@ -366,6 +457,7 @@ export function createTerminalController({
   function rememberResize(cols, rows) {
     runtime.lastResizeCols = cols;
     runtime.lastResizeRows = rows;
+    runtime.trzszBridge?.setTerminalColumns(cols);
   }
 
   function sendTerminalControlRequest(type, payload = {}) {
@@ -630,7 +722,9 @@ export function createTerminalController({
       runtime.socket._tmuxWebIntentionalClose = true;
       runtime.socket.close();
     }
+    runtime.trzszBridge?.stop();
     runtime.socket = null;
+    runtime.trzszBridge = null;
     runtime.socketSessionName = "";
     runtime.attachedClientKind = "";
     rejectTerminalControlRequests(new Error("terminal websocket reconnecting"));

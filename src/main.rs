@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, ValueEnum};
-use pty::TerminalSize;
+use pty::{TerminalSize, TransferRegistry};
 use serde::{Deserialize, Serialize};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -78,6 +78,7 @@ impl Theme {
 struct AppState {
     auth: AuthState,
     tmux: TmuxConfig,
+    transfers: TransferRegistry,
     theme: Theme,
 }
 
@@ -101,6 +102,12 @@ struct TerminalQuery {
     session: String,
     cols: Option<u16>,
     rows: Option<u16>,
+    transfer_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TransferQuery {
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -142,6 +149,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         auth: AuthState::new(token.clone(), false),
         tmux: TmuxConfig::new(args.tmux.clone(), args.socket_path.clone()),
+        transfers: TransferRegistry::default(),
         theme: args.theme,
     };
 
@@ -155,7 +163,8 @@ async fn main() -> Result<()> {
             "/api/sessions/{name}",
             delete(kill_session).put(rename_session),
         )
-        .route("/ws/terminal", get(terminal_ws));
+        .route("/ws/terminal", get(terminal_ws))
+        .route("/ws/trzsz", get(trzsz_ws));
 
     let app = if let Some(static_dir) = &args.static_dir {
         let index_file = static_dir.join("index.html");
@@ -327,7 +336,28 @@ async fn terminal_ws(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let size = TerminalSize::clamped(query.cols.unwrap_or(100), query.rows.unwrap_or(30));
-    ws.on_upgrade(move |socket| pty::run_terminal(socket, state.tmux.clone(), query.session, size))
+    ws.on_upgrade(move |socket| {
+        pty::run_terminal(
+            socket,
+            state.tmux.clone(),
+            state.transfers.clone(),
+            query.session,
+            size,
+            query.transfer_id,
+        )
+    })
+}
+
+async fn trzsz_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<TransferQuery>,
+) -> Response {
+    if require_auth(&headers, &state).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    ws.on_upgrade(move |socket| pty::run_trzsz_transfer(socket, state.transfers.clone(), query.id))
 }
 
 async fn embedded_static(uri: Uri) -> Response {

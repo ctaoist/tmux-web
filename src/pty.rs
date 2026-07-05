@@ -5,7 +5,9 @@ use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, PtySize};
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     io::{Read, Write},
+    sync::{Arc, Mutex},
     thread,
 };
 use tokio::sync::mpsc;
@@ -117,13 +119,61 @@ struct AttachInfo {
     client_kind: ClientKind,
 }
 
+#[derive(Clone, Default)]
+pub struct TransferRegistry {
+    inner: Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
+}
+
+impl TransferRegistry {
+    pub fn register(&self, id: &str, tx: mpsc::Sender<Vec<u8>>) -> Result<()> {
+        validate_transfer_id(id)?;
+        let mut transfers = self.inner.lock().expect("transfer registry lock poisoned");
+        if transfers.contains_key(id) {
+            return Err(anyhow::anyhow!("transfer id is already registered"));
+        }
+        transfers.insert(id.to_string(), tx);
+        Ok(())
+    }
+
+    pub fn unregister(&self, id: &str) {
+        if let Ok(mut transfers) = self.inner.lock() {
+            transfers.remove(id);
+        }
+    }
+
+    fn sender(&self, id: &str) -> Option<mpsc::Sender<Vec<u8>>> {
+        if validate_transfer_id(id).is_err() {
+            return None;
+        }
+        let transfers = self.inner.lock().ok()?;
+        transfers.get(id).cloned()
+    }
+}
+
+fn validate_transfer_id(id: &str) -> Result<()> {
+    if id.len() < 16 || id.len() > 128 {
+        return Err(anyhow::anyhow!("invalid transfer id"));
+    }
+    if !id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(anyhow::anyhow!("invalid transfer id"));
+    }
+    Ok(())
+}
+
 pub async fn run_terminal(
     socket: WebSocket,
     tmux: TmuxConfig,
+    transfers: TransferRegistry,
     session_name: String,
     size: TerminalSize,
+    transfer_id: Option<String>,
 ) {
-    if let Err(error) = run_terminal_inner(socket, tmux, session_name, size).await {
+    if let Err(error) = run_terminal_inner(socket, tmux, transfers, session_name, size, transfer_id)
+        .await
+    {
         eprintln!("terminal websocket failed: {error:#}");
     }
 }
@@ -131,8 +181,10 @@ pub async fn run_terminal(
 async fn run_terminal_inner(
     mut socket: WebSocket,
     tmux: TmuxConfig,
+    transfers: TransferRegistry,
     session_name: String,
     size: TerminalSize,
+    transfer_id: Option<String>,
 ) -> Result<()> {
     validate_session_name(&session_name)?;
     let attach = wait_for_attach(&mut socket, size).await?;
@@ -183,14 +235,19 @@ async fn run_terminal_inner(
         }
     });
 
+    let (transfer_tx, mut transfer_rx) = mpsc::channel::<Vec<u8>>(128);
+    let registered_transfer_id = match transfer_id {
+        Some(id) => {
+            transfers.register(&id, transfer_tx)?;
+            Some(id)
+        }
+        None => None,
+    };
+
     let (mut ws_tx, mut ws_rx) = socket.split();
     loop {
         tokio::select! {
-            Some(bytes) = pty_rx.recv() => {
-                if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
-                    break;
-                }
-            }
+            biased;
             Some(message) = ws_rx.next() => {
                 let Ok(message) = message else { break };
                 match message {
@@ -270,12 +327,58 @@ async fn run_terminal_inner(
                     Message::Pong(_) => {}
                 }
             }
+            Some(bytes) = pty_rx.recv() => {
+                if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                    break;
+                }
+            }
+            Some(bytes) = transfer_rx.recv() => {
+                if writer.write_all(&bytes).is_err() {
+                    break;
+                }
+                let _ = writer.flush();
+            }
             else => break,
         }
     }
 
+    if let Some(id) = registered_transfer_id {
+        transfers.unregister(&id);
+    }
     let _ = child.kill();
     Ok(())
+}
+
+pub async fn run_trzsz_transfer(
+    mut socket: WebSocket,
+    transfers: TransferRegistry,
+    transfer_id: String,
+) {
+    let Some(tx) = transfers.sender(&transfer_id) else {
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
+
+    while let Some(message) = socket.next().await {
+        let Ok(message) = message else { break };
+        match message {
+            Message::Text(text) => {
+                if tx.send(text.as_bytes().to_vec()).await.is_err() {
+                    break;
+                }
+            }
+            Message::Binary(bytes) => {
+                if tx.send(bytes.to_vec()).await.is_err() {
+                    break;
+                }
+            }
+            Message::Ping(bytes) => {
+                let _ = socket.send(Message::Pong(bytes)).await;
+            }
+            Message::Close(_) => break,
+            Message::Pong(_) => {}
+        }
+    }
 }
 
 async fn wait_for_attach(
