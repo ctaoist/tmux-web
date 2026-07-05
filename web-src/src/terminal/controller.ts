@@ -1,4 +1,6 @@
+import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
 import { isMobileViewport } from "../browser";
 import { installTerminalSelectionCopy } from "./selection";
@@ -11,6 +13,7 @@ type TmuxWebSocket = WebSocket & {
 
 const CLIENT_ACTIVITY_THROTTLE_MS = 250;
 const POINTER_ACTIVATION_SUPPRESS_MS = 600;
+const TERMINAL_METRICS_DEBUG_KEY = "tmux-web-debug-terminal-metrics";
 
 export function createTerminalController({
   state,
@@ -22,6 +25,7 @@ export function createTerminalController({
   const runtime = {
     terminalElement: null,
     terminal: null,
+    canvasAddon: null,
     fitAddon: null,
     socket: null,
     socketSessionName: "",
@@ -43,6 +47,7 @@ export function createTerminalController({
     settleFitTimer: 0,
     lastResizeCols: 0,
     lastResizeRows: 0,
+    terminalMetricsLogged: false,
   };
 
   function mount(element) {
@@ -73,20 +78,27 @@ export function createTerminalController({
     close({ disposeTerminal: true, intentional: true });
     terminalElement.innerHTML = "";
     runtime.terminal = new Terminal({
-      allowProposedApi: false,
+      allowProposedApi: true,
+      customGlyphs: true,
       cursorBlink: true,
       cursorStyle: "block",
       convertEol: false,
       fontFamily: '"Berkeley Mono", "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", monospace',
       fontSize: 14,
-      lineHeight: 1.12,
+      letterSpacing: 0,
+      lineHeight: 1,
       macOptionClickForcesSelection: true,
       scrollback: 5000,
       theme: TERMINAL_THEMES[state.theme],
     });
+    runtime.terminalMetricsLogged = false;
+    runtime.terminal.loadAddon(new Unicode11Addon());
+    runtime.terminal.unicode.activeVersion = "11";
     runtime.fitAddon = new FitAddon();
     runtime.terminal.loadAddon(runtime.fitAddon);
     runtime.terminal.open(terminalElement);
+    runtime.canvasAddon = new CanvasAddon();
+    runtime.terminal.loadAddon(runtime.canvasAddon);
     observeTerminalSize(terminalElement);
     runtime.touchScrollController = installTerminalTouchScroll(terminalElement);
     runtime.selectionCopyController = installTerminalSelectionCopy({
@@ -254,6 +266,7 @@ export function createTerminalController({
     if (disposeTerminal && runtime.terminal) {
       runtime.terminal.dispose();
       runtime.terminal = null;
+      runtime.canvasAddon = null;
       runtime.fitAddon = null;
     }
   }
@@ -509,6 +522,7 @@ export function createTerminalController({
     if (!runtime.fitAddon || !runtime.terminal) return;
     runtime.fitAddon.fit();
     alignTerminalScreenBottom();
+    logTerminalMetricsOnce();
   }
 
   function alignTerminalScreenBottom() {
@@ -525,7 +539,40 @@ export function createTerminalController({
     if (viewportRect.height <= 0 || screenRect.height <= 0) return;
 
     const offset = Math.max(0, viewportRect.bottom - screenRect.bottom);
-    terminalElement.style.setProperty("--terminal-screen-offset", `${Math.round(offset * 100) / 100}px`);
+    terminalElement.style.setProperty("--terminal-screen-offset", `${Math.round(offset)}px`);
+  }
+
+  function logTerminalMetricsOnce() {
+    if (!import.meta.env.DEV || runtime.terminalMetricsLogged) return;
+    if (!shouldLogTerminalMetrics()) return;
+    const terminalElement = runtime.terminalElement;
+    const terminal = runtime.terminal;
+    if (!terminalElement || !terminal || terminal.cols <= 0 || terminal.rows <= 0) return;
+
+    const screen = terminalElement.querySelector(".xterm-screen");
+    if (!screen) return;
+
+    const screenRect = screen.getBoundingClientRect();
+    if (screenRect.width <= 0 || screenRect.height <= 0) return;
+
+    runtime.terminalMetricsLogged = true;
+    console.debug("[tmux-web] terminal metrics", {
+      cols: terminal.cols,
+      rows: terminal.rows,
+      screenWidth: screenRect.width,
+      screenHeight: screenRect.height,
+      cellWidth: screenRect.width / terminal.cols,
+      cellHeight: screenRect.height / terminal.rows,
+      devicePixelRatio: window.devicePixelRatio,
+    });
+  }
+
+  function shouldLogTerminalMetrics() {
+    try {
+      return window.localStorage.getItem(TERMINAL_METRICS_DEBUG_KEY) === "1";
+    } catch (_) {
+      return false;
+    }
   }
 
   function fitAndResize() {
