@@ -46,13 +46,15 @@
   --viewport-top: 0px;
   --viewport-width: 100vw;
   --viewport-height: 100vh;
-  --sessionbar-height: 34px;
-  --tabbar-height: 36px;
+  --bar-control-height: 26px;
+  --sessionbar-height: var(--bar-control-height);
+  --tabbar-height: var(--bar-control-height);
   --nav-height: calc(var(--sessionbar-height) + var(--tabbar-height));
-  --mobile-sessionbar-height: 34px;
-  --mobile-tabbar-height: 36px;
+  --mobile-sessionbar-height: var(--bar-control-height);
+  --mobile-tabbar-height: var(--bar-control-height);
   --mobile-nav-height: calc(var(--mobile-sessionbar-height) + var(--mobile-tabbar-height));
-  --mobile-command-bar-height: 54px;
+  --command-bar-height: var(--bar-control-height);
+  --mobile-command-bar-height: var(--bar-control-height);
   --safe-area-top: env(safe-area-inset-top, 0px);
   --safe-area-right: env(safe-area-inset-right, 0px);
   --safe-area-bottom: env(safe-area-inset-bottom, 0px);
@@ -231,7 +233,7 @@ button {
 .workspace {
   position: relative;
   display: grid;
-  grid-template-rows: var(--nav-height) minmax(0, 1fr) 0 38px;
+  grid-template-rows: var(--nav-height) minmax(0, 1fr) 0 var(--command-bar-height);
   width: var(--viewport-width);
   height: var(--viewport-height);
   padding:
@@ -243,7 +245,7 @@ button {
 }
 
 .workspace.sticky-keys-open {
-  grid-template-rows: var(--nav-height) minmax(0, 1fr) auto 38px;
+  grid-template-rows: var(--nav-height) minmax(0, 1fr) auto var(--command-bar-height);
 }
 
 .nav-bars {
@@ -279,7 +281,7 @@ button {
 .session-select {
   min-width: 0;
   width: min(360px, 100%);
-  height: 26px;
+  height: var(--bar-control-height);
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: 0 28px 0 9px;
@@ -307,7 +309,7 @@ button {
   align-items: center;
   min-width: 118px;
   max-width: 240px;
-  height: calc(var(--tabbar-height) - 1px);
+  height: 100%;
   border: 0;
   border-right: 1px solid var(--line);
   border-bottom: 2px solid transparent;
@@ -351,8 +353,8 @@ button {
 
 .close-tab {
   display: grid;
-  width: 18px;
-  height: 18px;
+  width: var(--bar-control-height);
+  height: var(--bar-control-height);
   place-items: center;
   border: 0;
   border-radius: 3px;
@@ -370,14 +372,14 @@ button {
 .tab-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
+  gap: 4px;
+  padding: 0 6px;
   border-left: 1px solid var(--line);
 }
 
 .icon-button {
-  width: 32px;
-  height: 32px;
+  width: var(--bar-control-height);
+  height: var(--bar-control-height);
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--panel-2);
@@ -412,8 +414,12 @@ button {
 
 .terminal .xterm {
   height: 100%;
-  padding: 8px 10px;
+  padding: 8px 10px 0;
   touch-action: none;
+}
+
+.terminal .xterm-screen {
+  transform: translateY(var(--terminal-screen-offset, 0px));
 }
 
 .terminal .xterm-viewport {
@@ -482,10 +488,11 @@ button {
   align-items: center;
   position: relative;
   z-index: 12;
-  gap: 10px;
+  gap: 6px;
   border-top: 1px solid var(--line);
   background: var(--command-bar-bg);
-  padding: 0 10px;
+  min-height: var(--command-bar-height);
+  padding: 0 6px;
 }
 
 .command-item.mobile-only-command {
@@ -497,8 +504,8 @@ button {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  width: 32px;
-  height: 28px;
+  width: var(--bar-control-height);
+  height: var(--bar-control-height);
   border: 1px solid var(--command-item-border);
   border-radius: 4px;
   background: var(--command-item-bg);
@@ -519,11 +526,12 @@ button {
 
 .sticky-keys {
   min-width: 0;
+  height: var(--bar-control-height);
   min-height: 0;
   overflow: hidden;
   border-top: 1px solid var(--line);
   background: var(--panel);
-  padding: 6px 10px;
+  padding: 0 6px;
 }
 
 .sticky-keys[hidden] {
@@ -532,8 +540,10 @@ button {
 
 .sticky-key-row {
   display: flex;
+  align-items: center;
+  height: 100%;
   min-width: 0;
-  gap: 8px;
+  gap: 4px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
@@ -543,7 +553,7 @@ button {
 .sticky-key {
   flex: 0 0 auto;
   min-width: 42px;
-  height: 32px;
+  height: var(--bar-control-height);
   border: 1px solid var(--command-item-border);
   border-radius: 4px;
   padding: 0 10px;
@@ -567,7 +577,7 @@ button {
 .mode-pill {
   display: grid;
   min-width: 82px;
-  height: 24px;
+  height: var(--bar-control-height);
   place-items: center;
   border-radius: 4px;
   font-size: 12px;
@@ -589,7 +599,7 @@ button {
 .command-items {
   display: flex;
   min-width: 0;
-  gap: 8px;
+  gap: 4px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
@@ -601,7 +611,7 @@ button {
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  height: 28px;
+  height: var(--bar-control-height);
   border: 1px solid var(--command-item-border);
   border-radius: 4px;
   padding: 0 8px;
@@ -923,7 +933,7 @@ kbd {
 
   .window-tab {
     min-width: 112px;
-    height: calc(var(--mobile-tabbar-height) - 1px);
+    height: 100%;
   }
 
   .session-select-wrap {
@@ -932,7 +942,7 @@ kbd {
 
   .session-select {
     width: 100%;
-    height: 28px;
+    height: var(--bar-control-height);
   }
 
   .window-tab-main {
@@ -944,11 +954,15 @@ kbd {
   }
 
   .close-tab {
-    width: 32px;
-    height: 32px;
+    width: var(--bar-control-height);
+    height: var(--bar-control-height);
   }
 
-  .icon-button,
+  .icon-button {
+    min-width: var(--bar-control-height);
+    height: var(--bar-control-height);
+  }
+
   .primary-button,
   .empty-state button {
     min-width: 44px;
@@ -969,17 +983,17 @@ kbd {
     grid-template-rows: auto;
     align-content: center;
     gap: 0;
-    min-height: var(--mobile-command-bar-height);
+    min-height: calc(var(--mobile-command-bar-height) + var(--safe-area-bottom));
     padding:
-      6px
-      max(10px, var(--safe-area-right))
-      max(6px, var(--safe-area-bottom))
-      max(10px, var(--safe-area-left));
+      0
+      max(6px, var(--safe-area-right))
+      var(--safe-area-bottom)
+      max(6px, var(--safe-area-left));
     z-index: 40;
   }
 
   .command-bar.command-bar-locked {
-    min-height: var(--mobile-command-bar-height);
+    min-height: calc(var(--mobile-command-bar-height) + var(--safe-area-bottom));
   }
 
   .mode-pill {
@@ -987,10 +1001,10 @@ kbd {
   }
 
   .sticky-toggle {
-    flex: 0 0 44px;
-    width: 44px;
-    min-width: 44px;
-    height: 38px;
+    flex: 0 0 var(--bar-control-height);
+    width: var(--bar-control-height);
+    min-width: var(--bar-control-height);
+    height: var(--bar-control-height);
     padding: 0;
     color: var(--text);
   }
@@ -1007,13 +1021,14 @@ kbd {
     flex-wrap: nowrap;
     justify-content: flex-start;
     align-content: center;
-    gap: 6px;
+    gap: 4px;
     overflow-x: auto;
     overflow-y: hidden;
   }
 
   .command-item {
-    min-height: 38px;
+    height: var(--bar-control-height);
+    min-height: var(--bar-control-height);
     padding: 0 10px;
   }
 
@@ -1022,20 +1037,23 @@ kbd {
   }
 
   .sticky-keys {
-    padding: 8px 10px;
+    height: calc(var(--bar-control-height) + var(--bar-control-height) + 4px);
+    padding: 0 6px;
   }
 
   .sticky-key-row {
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 8px;
+    grid-auto-rows: var(--bar-control-height);
+    gap: 4px;
+    height: auto;
     overflow: visible;
   }
 
   .sticky-key {
     min-width: 0;
     width: 100%;
-    height: 42px;
+    height: var(--bar-control-height);
     overflow: hidden;
     padding: 0 4px;
     font-size: 12px;

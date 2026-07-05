@@ -508,6 +508,24 @@ export function createTerminalController({
   function fitTerminalViewport() {
     if (!runtime.fitAddon || !runtime.terminal) return;
     runtime.fitAddon.fit();
+    alignTerminalScreenBottom();
+  }
+
+  function alignTerminalScreenBottom() {
+    const terminalElement = runtime.terminalElement;
+    if (!terminalElement) return;
+
+    terminalElement.style.setProperty("--terminal-screen-offset", "0px");
+    const viewport = terminalElement.querySelector(".xterm-viewport");
+    const screen = terminalElement.querySelector(".xterm-screen");
+    if (!viewport || !screen) return;
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const screenRect = screen.getBoundingClientRect();
+    if (viewportRect.height <= 0 || screenRect.height <= 0) return;
+
+    const offset = Math.max(0, viewportRect.bottom - screenRect.bottom);
+    terminalElement.style.setProperty("--terminal-screen-offset", `${Math.round(offset * 100) / 100}px`);
   }
 
   function fitAndResize() {
