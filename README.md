@@ -12,9 +12,10 @@ cargo run -- --host 127.0.0.1 --port 8082 --theme dark
 ```
 
 `cargo build` embeds the generated `assets/dist` frontend into the Rust binary.
-Run `npm run build` again before rebuilding Rust whenever the web UI changes.
-Frontend source lives in `web-src/`; Vite writes the production bundle to
-`assets/dist`.
+Compressible embedded assets are stored as pre-compressed gzip bytes and served
+with `Content-Encoding: gzip`. Run `npm run build` again before rebuilding Rust
+whenever the web UI changes. Frontend source lives in `web-src/`; Vite writes
+the production bundle to `assets/dist`.
 
 The server prints a one-time token on startup. Open the printed URL and log in
 with that token.

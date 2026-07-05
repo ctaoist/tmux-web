@@ -360,7 +360,7 @@ async fn trzsz_ws(
     ws.on_upgrade(move |socket| pty::run_trzsz_transfer(socket, state.transfers.clone(), query.id))
 }
 
-async fn embedded_static(uri: Uri) -> Response {
+async fn embedded_static(headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
     let fallback = if path.starts_with("assets/") {
@@ -372,18 +372,76 @@ async fn embedded_static(uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     };
 
+    if asset.encoding == Some("gzip") && !accepts_gzip(&headers) {
+        return Response::builder()
+            .status(StatusCode::NOT_ACCEPTABLE)
+            .header(header::VARY, header::ACCEPT_ENCODING.as_str())
+            .body(Body::empty())
+            .expect("embedded asset response should be valid");
+    }
+
     let cache_control = if asset.path == "index.html" {
         "no-cache"
     } else {
         "public, max-age=31536000, immutable"
     };
 
-    Response::builder()
+    let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, asset.mime)
         .header(header::CACHE_CONTROL, cache_control)
+        .header(header::VARY, header::ACCEPT_ENCODING.as_str());
+
+    if let Some(encoding) = asset.encoding {
+        response = response.header(header::CONTENT_ENCODING, encoding);
+    }
+
+    response
         .body(Body::from(Bytes::from_static(asset.bytes)))
         .expect("embedded asset response should be valid")
+}
+
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    let mut saw_accept_encoding = false;
+    let mut gzip_quality = None;
+    let mut wildcard_quality = None;
+
+    for value in headers.get_all(header::ACCEPT_ENCODING) {
+        let Ok(value) = value.to_str() else {
+            saw_accept_encoding = true;
+            continue;
+        };
+        saw_accept_encoding = true;
+
+        for coding in value.split(',') {
+            let mut parts = coding.split(';').map(str::trim);
+            let name = parts.next().unwrap_or_default();
+            let quality = qvalue(parts);
+
+            if name.eq_ignore_ascii_case("gzip") {
+                gzip_quality = Some(quality);
+            } else if name == "*" {
+                wildcard_quality = Some(quality);
+            }
+        }
+    }
+
+    match gzip_quality.or(wildcard_quality) {
+        Some(quality) => quality > 0.0,
+        None => !saw_accept_encoding,
+    }
+}
+
+fn qvalue<'a>(params: impl Iterator<Item = &'a str>) -> f32 {
+    for param in params {
+        let Some((name, value)) = param.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("q") {
+            return value.trim().parse::<f32>().unwrap_or(0.0);
+        }
+    }
+    1.0
 }
 
 fn api_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -401,4 +459,59 @@ fn bad_request(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
 
 fn internal_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn missing_accept_encoding_allows_gzip() {
+        assert!(accepts_gzip(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn gzip_accept_encoding_allows_gzip() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("br, gzip;q=1.0"),
+        );
+
+        assert!(accepts_gzip(&headers));
+    }
+
+    #[test]
+    fn wildcard_accept_encoding_allows_gzip() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("br;q=1.0, *;q=0.5"),
+        );
+
+        assert!(accepts_gzip(&headers));
+    }
+
+    #[test]
+    fn gzip_q_zero_rejects_gzip() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip;q=0, br"),
+        );
+
+        assert!(!accepts_gzip(&headers));
+    }
+
+    #[test]
+    fn explicit_gzip_q_zero_overrides_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            HeaderValue::from_static("gzip;q=0, *;q=1"),
+        );
+
+        assert!(!accepts_gzip(&headers));
+    }
 }

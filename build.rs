@@ -1,5 +1,7 @@
+use flate2::{Compression, GzBuilder};
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -20,11 +22,15 @@ fn main() {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", dist_dir.display()));
     files.sort_by(|left, right| left.0.cmp(&right.0));
 
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let gzip_dir = out_dir.join("embedded-assets-gzip");
+
     let mut generated = String::from(
         r#"#[derive(Clone, Copy, Debug)]
 pub struct EmbeddedAsset {
     pub path: &'static str,
     pub mime: &'static str,
+    pub encoding: Option<&'static str>,
     pub bytes: &'static [u8],
 }
 
@@ -34,8 +40,12 @@ pub static EMBEDDED_ASSETS: &[EmbeddedAsset] = &[
 
     for (relative_path, absolute_path) in files {
         println!("cargo:rerun-if-changed={}", absolute_path.display());
-        let absolute_path = absolute_path.canonicalize().unwrap_or_else(|err| {
-            panic!("failed to canonicalize {}: {err}", absolute_path.display())
+        let (embedded_path, encoding) =
+            embedded_asset_path(&relative_path, &absolute_path, &gzip_dir).unwrap_or_else(|err| {
+                panic!("failed to prepare {}: {err}", absolute_path.display())
+            });
+        let embedded_path = embedded_path.canonicalize().unwrap_or_else(|err| {
+            panic!("failed to canonicalize {}: {err}", embedded_path.display())
         });
         generated.push_str("    EmbeddedAsset {\n");
         generated.push_str(&format!(
@@ -47,17 +57,48 @@ pub static EMBEDDED_ASSETS: &[EmbeddedAsset] = &[
             string_literal(mime_for(&relative_path))
         ));
         generated.push_str(&format!(
+            "        encoding: {},\n",
+            option_string_literal(encoding)
+        ));
+        generated.push_str(&format!(
             "        bytes: include_bytes!({}),\n",
-            string_literal(&absolute_path.to_string_lossy())
+            string_literal(&embedded_path.to_string_lossy())
         ));
         generated.push_str("    },\n");
     }
 
     generated.push_str("];\n");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     fs::write(out_dir.join("embedded_assets.rs"), generated)
         .expect("failed to write embedded asset table");
+}
+
+fn embedded_asset_path(
+    relative_path: &str,
+    source_path: &Path,
+    gzip_dir: &Path,
+) -> io::Result<(PathBuf, Option<&'static str>)> {
+    let original = fs::read(source_path)?;
+    let gzip = gzip_bytes(&original)?;
+
+    if gzip.len() >= original.len() {
+        return Ok((source_path.to_path_buf(), None));
+    }
+
+    let gzip_path = gzip_dir.join(format!("{relative_path}.gz"));
+    if let Some(parent) = gzip_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&gzip_path, gzip)?;
+    Ok((gzip_path, Some("gzip")))
+}
+
+fn gzip_bytes(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let mut encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::best());
+    encoder.write_all(bytes)?;
+    encoder.finish()
 }
 
 fn collect_files(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> io::Result<()> {
@@ -105,4 +146,10 @@ fn mime_for(path: &str) -> &'static str {
 
 fn string_literal(value: &str) -> String {
     format!("{value:?}")
+}
+
+fn option_string_literal(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("Some({})", string_literal(value)))
+        .unwrap_or_else(|| "None".to_string())
 }
