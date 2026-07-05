@@ -1,4 +1,4 @@
-use crate::tmux::{validate_session_name, TmuxConfig};
+use crate::tmux::{validate_session_name, TmuxConfig, TmuxPaneBorderTheme};
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -19,6 +19,7 @@ enum ClientTerminalMessage {
         cols: u16,
         rows: u16,
         client_kind: ClientKind,
+        pane_border_theme: Option<TmuxPaneBorderTheme>,
     },
     Input {
         data: String,
@@ -28,6 +29,9 @@ enum ClientTerminalMessage {
         rows: u16,
     },
     ClientActivity,
+    SetPaneBorderTheme {
+        pane_border_theme: TmuxPaneBorderTheme,
+    },
     GetZoom {
         request_id: String,
     },
@@ -93,7 +97,8 @@ impl ClientTerminalMessage {
             Self::Attach { .. }
             | Self::Input { .. }
             | Self::Resize { .. }
-            | Self::ClientActivity => None,
+            | Self::ClientActivity
+            | Self::SetPaneBorderTheme { .. } => None,
         }
     }
 }
@@ -113,10 +118,11 @@ impl TerminalSize {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct AttachInfo {
     size: TerminalSize,
     client_kind: ClientKind,
+    pane_border_theme: TmuxPaneBorderTheme,
 }
 
 #[derive(Clone, Default)]
@@ -171,8 +177,8 @@ pub async fn run_terminal(
     size: TerminalSize,
     transfer_id: Option<String>,
 ) {
-    if let Err(error) = run_terminal_inner(socket, tmux, transfers, session_name, size, transfer_id)
-        .await
+    if let Err(error) =
+        run_terminal_inner(socket, tmux, transfers, session_name, size, transfer_id).await
     {
         eprintln!("terminal websocket failed: {error:#}");
     }
@@ -188,6 +194,13 @@ async fn run_terminal_inner(
 ) -> Result<()> {
     validate_session_name(&session_name)?;
     let attach = wait_for_attach(&mut socket, size).await?;
+    let mut pane_border_theme = attach.pane_border_theme.clone();
+    if let Err(error) = tmux
+        .apply_pane_border_theme_to_session_windows(&session_name, &pane_border_theme)
+        .await
+    {
+        eprintln!("failed to apply pane border theme before attach: {error:#}");
+    }
     apply_responsive_layout_for_client(&tmux, &session_name, attach.client_kind).await?;
     let size = attach.size;
     let default_client_kind = attach.client_kind;
@@ -293,6 +306,7 @@ async fn run_terminal_inner(
                                     &tmux,
                                     &session_name,
                                     default_client_kind,
+                                    &mut pane_border_theme,
                                     message,
                                 )
                                 .await
@@ -399,10 +413,12 @@ async fn wait_for_attach(
                         cols,
                         rows,
                         client_kind,
+                        pane_border_theme,
                     }) => {
                         return Ok(AttachInfo {
                             size: TerminalSize::clamped(cols, rows),
                             client_kind,
+                            pane_border_theme: pane_border_theme.unwrap_or_default(),
                         });
                     }
                     Ok(ClientTerminalMessage::Resize { cols, rows }) => {
@@ -443,6 +459,7 @@ async fn control_response(
     tmux: &TmuxConfig,
     session_name: &str,
     default_client_kind: ClientKind,
+    pane_border_theme: &mut TmuxPaneBorderTheme,
     message: ClientTerminalMessage,
 ) -> Option<String> {
     match message {
@@ -451,6 +468,18 @@ async fn control_response(
                 apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await
             {
                 eprintln!("failed to apply responsive layout for client activity: {error:#}");
+            }
+            None
+        }
+        ClientTerminalMessage::SetPaneBorderTheme {
+            pane_border_theme: theme,
+        } => {
+            *pane_border_theme = theme;
+            if let Err(error) = tmux
+                .apply_pane_border_theme_to_session_windows(session_name, pane_border_theme)
+                .await
+            {
+                eprintln!("failed to apply pane border theme: {error:#}");
             }
             None
         }
@@ -545,6 +574,8 @@ async fn control_response(
                         .await?;
                 }
                 let window = tmux.create_window(session_name, name).await?;
+                tmux.apply_pane_border_theme_to_window(&window.id, pane_border_theme)
+                    .await?;
                 if default_client_kind.should_zoom() {
                     apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
                         .await?;
@@ -568,6 +599,8 @@ async fn control_response(
                         .await?;
                 }
                 let window = tmux.select_window(session_name, &window_id).await?;
+                tmux.apply_pane_border_theme_to_window(&window.id, pane_border_theme)
+                    .await?;
                 if default_client_kind.should_zoom() {
                     apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
                         .await?;

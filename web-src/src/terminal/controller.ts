@@ -4,7 +4,6 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
 import { isMobileViewport } from "../browser";
 import { installTerminalSelectionCopy } from "./selection";
-import { TERMINAL_THEMES } from "./themes";
 import { installTerminalTouchScroll } from "./touch";
 import { createTrzszBridge, generateTransferId } from "./trzsz";
 
@@ -32,6 +31,8 @@ export function createTerminalController({
     socket: null,
     socketSessionName: "",
     attachedClientKind: "",
+    tmuxTheme: null,
+    lastTmuxThemeSignature: "",
     controlRequests: new Map(),
     nextControlRequestId: 1,
     resizeObserver: null,
@@ -92,7 +93,7 @@ export function createTerminalController({
       lineHeight: 1,
       macOptionClickForcesSelection: true,
       scrollback: 5000,
-      theme: TERMINAL_THEMES[state.theme],
+      theme: state.terminalTheme || {},
     });
     runtime.terminalMetricsLogged = false;
     runtime.terminal.loadAddon(new Unicode11Addon());
@@ -226,8 +227,16 @@ export function createTerminalController({
     fitTerminalViewport();
     const { cols, rows } = proposedSize();
     const clientKind = currentClientKind();
-    socket.send(JSON.stringify({ type: "attach", cols, rows, client_kind: clientKind }));
+    const tmuxTheme = runtime.tmuxTheme || state.tmuxTheme || {};
+    socket.send(JSON.stringify({
+      type: "attach",
+      cols,
+      rows,
+      client_kind: clientKind,
+      pane_border_theme: tmuxThemeToWire(tmuxTheme),
+    }));
     runtime.attachedClientKind = clientKind;
+    runtime.lastTmuxThemeSignature = tmuxThemeSignature(tmuxTheme);
     rememberResize(cols, rows);
     setState({
       connected: true,
@@ -485,6 +494,17 @@ export function createTerminalController({
     return isMobileViewport() ? "mobile" : "desktop";
   }
 
+  function tmuxThemeToWire(theme) {
+    return {
+      pane_border_style: theme?.paneBorderStyle || null,
+      pane_active_border_style: theme?.paneActiveBorderStyle || null,
+    };
+  }
+
+  function tmuxThemeSignature(theme) {
+    return JSON.stringify(tmuxThemeToWire(theme));
+  }
+
   function handleTerminalControlMessage(data) {
     let message;
     try {
@@ -740,8 +760,27 @@ export function createTerminalController({
 
   function applyTheme(theme) {
     if (runtime.terminal) {
-      runtime.terminal.options.theme = TERMINAL_THEMES[theme] || TERMINAL_THEMES.dark;
+      runtime.terminal.options.theme = theme || {};
     }
+  }
+
+  function applyTmuxTheme(theme) {
+    runtime.tmuxTheme = theme || {};
+    sendTmuxTheme();
+  }
+
+  function sendTmuxTheme() {
+    if (!runtime.socket || runtime.socket.readyState !== WebSocket.OPEN) return;
+    if (!runtime.attachedClientKind) return;
+
+    const theme = runtime.tmuxTheme || {};
+    const signature = tmuxThemeSignature(theme);
+    if (signature === runtime.lastTmuxThemeSignature) return;
+    runtime.lastTmuxThemeSignature = signature;
+    runtime.socket.send(JSON.stringify({
+      type: "set_pane_border_theme",
+      pane_border_theme: tmuxThemeToWire(theme),
+    }));
   }
 
   function focus() {
@@ -788,6 +827,7 @@ export function createTerminalController({
 
   return {
     applyTheme,
+    applyTmuxTheme,
     close,
     createWindow,
     dropPaneCache,

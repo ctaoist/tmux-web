@@ -1,6 +1,6 @@
-export type ConfigResponse = {
-  theme?: string;
-};
+import type { ThemeConfig } from "./terminal/themes";
+
+export type ConfigResponse = ThemeConfig;
 
 export type MeResponse = {
   authenticated: boolean;
@@ -38,7 +38,7 @@ export async function fetchMe(): Promise<MeResponse> {
   return response.json();
 }
 
-export async function fetchConfig(): Promise<ConfigResponse> {
+export async function fetchConfig(): Promise<ThemeConfig> {
   return fetch("/api/config", { credentials: "same-origin" })
     .then((response) => (response.ok ? response.json() : {}))
     .catch(() => ({}));

@@ -1,4 +1,4 @@
-import { createEffect, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
 import { createStore } from "solid-js/store";
 import { createActions } from "./actions";
 import { installContextMenuSuppression, installViewportSizeSync } from "./browser";
@@ -6,9 +6,17 @@ import LoginView from "./components/LoginView";
 import Workspace from "./components/Workspace";
 import { createInitialState } from "./state";
 import { createTerminalController } from "./terminal/controller";
+import {
+  applyResolvedThemeToDocument,
+  resolveTheme,
+  terminalThemeFromDocument,
+  tmuxThemeFromDocument,
+  type ColorScheme,
+} from "./terminal/themes";
 
 export default function App() {
   const [state, setState] = createStore(createInitialState());
+  const [systemColorScheme, setSystemColorScheme] = createSignal(currentSystemColorScheme());
   let terminal;
   const actions = createActions({
     state,
@@ -27,11 +35,28 @@ export default function App() {
   const cleanup = [];
 
   createEffect(() => {
-    document.documentElement.dataset.theme = state.theme;
-    terminal.applyTheme(state.theme);
+    const root = document.documentElement;
+    const theme = resolveTheme(
+      state.themePreference,
+      state.themeConfig,
+      systemColorScheme(),
+    );
+    applyResolvedThemeToDocument(root, theme);
+    const terminalTheme = terminalThemeFromDocument(root, theme);
+    const tmuxTheme = tmuxThemeFromDocument(root, theme);
+    setState({
+      resolvedTheme: theme.resolvedTheme,
+      colorScheme: theme.colorScheme,
+      uiTheme: theme.ui,
+      terminalTheme,
+      tmuxTheme,
+    });
+    terminal.applyTheme(terminalTheme);
+    terminal.applyTmuxTheme(tmuxTheme);
   });
 
   onMount(() => {
+    cleanup.push(installSystemThemeSync(setSystemColorScheme));
     cleanup.push(installViewportSizeSync(() => terminal.handleViewportChange()));
     cleanup.push(installContextMenuSuppression());
     window.addEventListener("keydown", actions.handleGlobalKeyEvent, true);
@@ -67,4 +92,20 @@ export default function App() {
       <Workspace state={state} actions={actions} terminal={terminal} />
     </Show>
   );
+}
+
+function currentSystemColorScheme(): ColorScheme {
+  return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+
+function installSystemThemeSync(setSystemColorScheme: (scheme: ColorScheme) => void) {
+  const media = window.matchMedia?.("(prefers-color-scheme: light)");
+  if (!media) return () => {};
+
+  const handleChange = () => {
+    setSystemColorScheme(media.matches ? "light" : "dark");
+  };
+  media.addEventListener("change", handleChange);
+  handleChange();
+  return () => media.removeEventListener("change", handleChange);
 }

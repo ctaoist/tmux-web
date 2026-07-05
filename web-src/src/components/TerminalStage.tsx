@@ -17,7 +17,6 @@ export default function TerminalStage(props) {
         <TerminalHost
           terminal={props.terminal}
           activeSession={props.state.activeSession}
-          theme={props.state.theme}
         />
       </Show>
       <ConnectionOverlay state={props.state} />
@@ -38,10 +37,6 @@ function TerminalHost(props) {
       props.terminal.sync(Boolean(previousSession));
     },
   ));
-
-  createEffect(() => {
-    props.terminal.applyTheme(props.theme);
-  });
 
   onCleanup(() => {
     props.terminal.unmount();

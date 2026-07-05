@@ -6,6 +6,11 @@ import {
   composeSpecialKey,
   emptyStickyModifiers,
 } from "./keyboard";
+import { normalizeThemePreference, type ThemeConfig } from "./terminal/themes";
+
+function isThemeConfig(value: unknown): value is ThemeConfig {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
 
 export function createActions({ state, setState, getTerminal }) {
   const authorizedApi = (path: string, options: RequestInit = {}) => (
@@ -34,11 +39,15 @@ export function createActions({ state, setState, getTerminal }) {
 
   async function loadConfig() {
     const config = await fetchConfig();
-    applyTheme(config.theme);
+    applyThemeConfig(config);
   }
 
-  function applyTheme(theme) {
-    setState("theme", theme === "light" ? "light" : "dark");
+  function applyThemeConfig(config: ThemeConfig = { theme: "auto" }) {
+    const themeConfig = isThemeConfig(config) ? config : { theme: "auto" };
+    setState({
+      themeConfig,
+      themePreference: normalizeThemePreference(themeConfig),
+    });
   }
 
   async function login(token) {
@@ -394,7 +403,6 @@ export function createActions({ state, setState, getTerminal }) {
 
   return {
     applyStickyModifiers,
-    applyTheme,
     bootstrap,
     closeCommandMenu,
     closePaneList,

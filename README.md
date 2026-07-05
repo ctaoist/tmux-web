@@ -8,7 +8,7 @@ opens real `tmux attach-session` clients behind a browser terminal.
 ```sh
 npm install
 npm run build
-cargo run -- --host 127.0.0.1 --port 8082 --theme dark
+cargo run -- --host 127.0.0.1 --port 8082 --theme auto
 ```
 
 `cargo build` embeds the generated `assets/dist` frontend into the Rust binary.
@@ -29,10 +29,54 @@ TMUX_WEB_HOST=0.0.0.0 TMUX_WEB_PORT=8082 TMUX_WEB_THEME=light cargo run
 - `--host` configures the HTTP bind address. `--listen` remains supported as an
   alias-compatible legacy name.
 - `--port` configures the HTTP port.
-- `--theme` accepts `dark` or `light` and controls the web UI and terminal color
-  palette.
+- `--theme` accepts `auto`, `dark`, `light`, or a JSON theme file path. The
+  default is `auto`. `TMUX_WEB_THEME` uses the same values.
 - `--static-dir` serves frontend files from a directory instead of the embedded
   assets. This is mainly useful while iterating on local frontend builds.
+
+Built-in UI CSS variables, xterm palettes, and tmux pane border styles live in
+`web-src/styles/theme.css`.
+
+Theme files use a top-level `theme` selector. `auto` follows the browser system theme and can partially override built-in `dark` or `light` definitions:
+
+```json
+{
+  "theme": "auto",
+  "light": {
+    "ui": {
+      "--bg": "#eff1f5"
+    },
+    "terminal": {
+      "background": "#eff1f5",
+      "foreground": "#4c4f69"
+    },
+    "tmux": {
+      "paneBorderStyle": "fg=#bcc0cc",
+      "paneActiveBorderStyle": "fg=#179299"
+    }
+  }
+}
+```
+
+Custom theme names must have a matching top-level definition and are applied as provided:
+
+```json
+{
+  "theme": "my-theme",
+  "my-theme": {
+    "ui": {
+      "--bg": "#111111",
+      "--panel": "#181818",
+      "--text": "#eeeeee"
+    },
+    "terminal": {
+      "background": "#111111",
+      "foreground": "#eeeeee",
+      "cursor": "#ffcc66"
+    }
+  }
+}
+```
 
 ## Notes
 

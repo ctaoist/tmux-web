@@ -13,9 +13,10 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use pty::{TerminalSize, TransferRegistry};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
@@ -39,8 +40,8 @@ struct Args {
     #[arg(long, env = "TMUX_WEB_PORT", default_value_t = 8082)]
     port: u16,
 
-    #[arg(long, env = "TMUX_WEB_THEME", value_enum, default_value = "dark")]
-    theme: Theme,
+    #[arg(long, env = "TMUX_WEB_THEME", default_value = "auto")]
+    theme: String,
 
     #[arg(long, default_value = "tmux")]
     tmux: PathBuf,
@@ -58,28 +59,14 @@ struct Args {
     static_dir: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-enum Theme {
-    Dark,
-    Light,
-}
-
-impl Theme {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Dark => "dark",
-            Self::Light => "light",
-        }
-    }
-}
+type ThemeConfig = Value;
 
 #[derive(Clone)]
 struct AppState {
     auth: AuthState,
     tmux: TmuxConfig,
     transfers: TransferRegistry,
-    theme: Theme,
+    theme_config: ThemeConfig,
 }
 
 #[derive(Deserialize)]
@@ -121,11 +108,6 @@ struct MeResponse {
 }
 
 #[derive(Serialize)]
-struct ConfigResponse {
-    theme: Theme,
-}
-
-#[derive(Serialize)]
 struct SessionsResponse {
     sessions: Vec<TmuxSession>,
 }
@@ -146,11 +128,17 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 async fn main() -> Result<()> {
     let args = Args::parse();
     let token = load_token(&args)?;
+    let theme_config = load_theme_config(&args.theme)?;
+    let theme_name = theme_config
+        .get("theme")
+        .and_then(Value::as_str)
+        .unwrap_or("auto")
+        .to_string();
     let state = AppState {
         auth: AuthState::new(token.clone(), false),
         tmux: TmuxConfig::new(args.tmux.clone(), args.socket_path.clone()),
         transfers: TransferRegistry::default(),
-        theme: args.theme,
+        theme_config,
     };
 
     let app = Router::new()
@@ -178,7 +166,7 @@ async fn main() -> Result<()> {
 
     let addr = SocketAddr::new(args.host, args.port);
     eprintln!("tmux-web listening on http://{addr}");
-    eprintln!("tmux-web theme: {}", args.theme.as_str());
+    eprintln!("tmux-web theme: {theme_name}");
     eprintln!("tmux-web token: {token}");
     if let Some(static_dir) = &args.static_dir {
         eprintln!("tmux-web frontend: {}", static_dir.display());
@@ -222,6 +210,62 @@ fn load_token(args: &Args) -> Result<String> {
         .collect())
 }
 
+fn load_theme_config(theme: &str) -> Result<ThemeConfig> {
+    let theme = theme.trim();
+    if theme.is_empty() {
+        return Err(anyhow!("--theme must not be empty"));
+    }
+
+    if is_builtin_theme_preference(theme) {
+        return Ok(builtin_theme_config(theme));
+    }
+
+    let path = PathBuf::from(theme);
+    let contents = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read theme file {}", path.display()))?;
+    let value: Value = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse theme file {}", path.display()))?;
+    let Value::Object(mut object) = value else {
+        return Err(anyhow!(
+            "theme file {} must contain a JSON object",
+            path.display()
+        ));
+    };
+
+    let theme_name = object
+        .get("theme")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|theme| !theme.is_empty())
+        .ok_or_else(|| anyhow!("theme file must contain a top-level string field \"theme\""))?
+        .to_string();
+
+    if theme_name == "theme" {
+        return Err(anyhow!("theme name \"theme\" is reserved"));
+    }
+
+    if !is_builtin_theme_preference(&theme_name) && !object.contains_key(&theme_name) {
+        return Err(anyhow!(
+            "theme file selected theme \"{}\" but no top-level \"{}\" definition exists",
+            theme_name,
+            theme_name
+        ));
+    }
+
+    object.insert("theme".to_string(), Value::String(theme_name));
+    Ok(Value::Object(object))
+}
+
+fn is_builtin_theme_preference(theme: &str) -> bool {
+    matches!(theme, "auto" | "dark" | "light")
+}
+
+fn builtin_theme_config(theme: &str) -> ThemeConfig {
+    let mut object = serde_json::Map::new();
+    object.insert("theme".to_string(), Value::String(theme.to_string()));
+    Value::Object(object)
+}
+
 fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode, Json<ApiError>)> {
     if state.auth.authenticated(headers) {
         Ok(())
@@ -262,8 +306,8 @@ async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Json<MeRe
     })
 }
 
-async fn config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
-    Json(ConfigResponse { theme: state.theme })
+async fn config(State(state): State<Arc<AppState>>) -> Json<ThemeConfig> {
+    Json(state.theme_config.clone())
 }
 
 async fn list_sessions(
@@ -465,6 +509,8 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn missing_accept_encoding_allows_gzip() {
@@ -513,5 +559,64 @@ mod tests {
         );
 
         assert!(!accepts_gzip(&headers));
+    }
+
+    #[test]
+    fn builtin_theme_preferences_return_theme_config() {
+        for theme in ["auto", "dark", "light"] {
+            let config = load_theme_config(theme).expect("builtin theme should load");
+            assert_eq!(config.get("theme").and_then(Value::as_str), Some(theme));
+        }
+    }
+
+    #[test]
+    fn theme_file_returns_validated_json_object() {
+        let file = write_theme_file(
+            r##"{
+              "theme": "auto",
+              "light": {
+                "ui": { "--bg": "#eff1f5" },
+                "terminal": { "background": "#eff1f5", "foreground": "#4c4f69" }
+              }
+            }"##,
+        );
+
+        let config = load_theme_config(file.path().to_str().unwrap()).expect("theme file loads");
+
+        assert_eq!(config.get("theme").and_then(Value::as_str), Some("auto"));
+        assert!(config.get("light").is_some());
+    }
+
+    #[test]
+    fn theme_file_requires_top_level_theme_field() {
+        let file = write_theme_file(r##"{ "light": {} }"##);
+        let error = load_theme_config(file.path().to_str().unwrap()).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("top-level string field \"theme\""));
+    }
+
+    #[test]
+    fn theme_file_requires_selected_custom_theme_definition() {
+        let file = write_theme_file(r##"{ "theme": "missing-theme" }"##);
+        let error = load_theme_config(file.path().to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("missing-theme"));
+    }
+
+    #[test]
+    fn theme_file_rejects_invalid_json() {
+        let file = write_theme_file(r##"{ "theme": "auto" "##);
+        let error = load_theme_config(file.path().to_str().unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("failed to parse theme file"));
+    }
+
+    fn write_theme_file(contents: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("temp file should be created");
+        file.write_all(contents.as_bytes())
+            .expect("temp file should be writable");
+        file
     }
 }

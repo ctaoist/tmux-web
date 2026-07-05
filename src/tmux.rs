@@ -53,6 +53,12 @@ pub struct TmuxWindow {
     pub zoomed: bool,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TmuxPaneBorderTheme {
+    pub pane_border_style: Option<String>,
+    pub pane_active_border_style: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct TmuxWindowEntry {
     session_id: String,
@@ -95,6 +101,20 @@ struct TmuxCurrentWindowState {
     window_layout: String,
     window_zoomed: bool,
     active_pane_id: String,
+}
+
+impl TmuxPaneBorderTheme {
+    pub fn is_empty(&self) -> bool {
+        self.pane_border_style
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+            && self
+                .pane_active_border_style
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+    }
 }
 
 impl TmuxConfig {
@@ -219,6 +239,70 @@ impl TmuxConfig {
     pub async fn list_windows(&self, session_name: &str) -> Result<Vec<TmuxWindow>> {
         let entries = self.list_window_entries(session_name).await?;
         Ok(entries.into_iter().map(|entry| entry.window).collect())
+    }
+
+    pub async fn apply_pane_border_theme_to_session_windows(
+        &self,
+        session_name: &str,
+        theme: &TmuxPaneBorderTheme,
+    ) -> Result<()> {
+        validate_session_name(session_name)?;
+        validate_pane_border_theme(theme)?;
+        if theme.is_empty() {
+            return Ok(());
+        }
+
+        let windows = self.list_window_entries(session_name).await?;
+        for entry in windows {
+            self.apply_pane_border_theme_to_window(&entry.window.id, theme)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn apply_pane_border_theme_to_window(
+        &self,
+        window_id: &str,
+        theme: &TmuxPaneBorderTheme,
+    ) -> Result<()> {
+        validate_window_id(window_id)?;
+        validate_pane_border_theme(theme)?;
+        if let Some(style) = theme
+            .pane_border_style
+            .as_deref()
+            .filter(|style| !style.is_empty())
+        {
+            self.set_window_option(window_id, "pane-border-style", style)
+                .await?;
+        }
+        if let Some(style) = theme
+            .pane_active_border_style
+            .as_deref()
+            .filter(|style| !style.is_empty())
+        {
+            self.set_window_option(window_id, "pane-active-border-style", style)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn set_window_option(&self, window_id: &str, option: &str, value: &str) -> Result<()> {
+        let output = self
+            .command()
+            .arg("set-window-option")
+            .arg("-q")
+            .arg("-t")
+            .arg(window_id)
+            .arg(option)
+            .arg(value)
+            .output()
+            .await
+            .with_context(|| format!("failed to execute tmux set-window-option {option}"))?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux set-window-option",
+        )
     }
 
     async fn list_window_entries(&self, session_name: &str) -> Result<Vec<TmuxWindowEntry>> {
@@ -718,6 +802,26 @@ fn validate_pane_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_pane_border_theme(theme: &TmuxPaneBorderTheme) -> Result<()> {
+    if let Some(style) = &theme.pane_border_style {
+        validate_tmux_style(style)?;
+    }
+    if let Some(style) = &theme.pane_active_border_style {
+        validate_tmux_style(style)?;
+    }
+    Ok(())
+}
+
+fn validate_tmux_style(style: &str) -> Result<()> {
+    if style.len() > 256 {
+        return Err(anyhow!("tmux style must be 256 characters or fewer"));
+    }
+    if style.chars().any(|ch| ch.is_control()) {
+        return Err(anyhow!("tmux style contains unsupported characters"));
+    }
+    Ok(())
+}
+
 fn generated_session_name() -> String {
     let suffix: String = Uuid::new_v4()
         .simple()
@@ -951,6 +1055,21 @@ mod tests {
         assert!(validate_pane_id("").is_err());
         assert!(validate_pane_id("%1:bad").is_err());
         assert!(validate_pane_id("bad pane").is_err());
+    }
+
+    #[test]
+    fn validates_pane_border_theme_styles() {
+        let theme = TmuxPaneBorderTheme {
+            pane_border_style: Some("fg=#31373b".to_string()),
+            pane_active_border_style: Some("fg=#65a8a6,bold".to_string()),
+        };
+        assert!(validate_pane_border_theme(&theme).is_ok());
+
+        let theme = TmuxPaneBorderTheme {
+            pane_border_style: Some("fg=#31373b\nset -g status off".to_string()),
+            pane_active_border_style: None,
+        };
+        assert!(validate_pane_border_theme(&theme).is_err());
     }
 
     #[test]
