@@ -14,15 +14,6 @@ export default function CommandBar(props) {
         "command-bar-unlocked": props.state.mode !== "locked",
       }}
     >
-      <div
-        class="mode-pill"
-        classList={{
-          locked: props.state.mode === "locked",
-          unlocked: props.state.mode !== "locked",
-        }}
-      >
-        {props.state.mode === "locked" ? "LOCKED" : "COMMAND"}
-      </div>
       <div class="command-items">
         <For each={items()}>
           {(item) => (
@@ -32,6 +23,9 @@ export default function CommandBar(props) {
               classList={{
                 active: Boolean(item.menu && props.state.activeMenu === item.menu),
                 "mobile-only-command": Boolean(item.mobileOnly),
+                "mode-toggle": item.action === "toggle-mode",
+                "mode-toggle-locked": item.action === "toggle-mode" && props.state.mode === "locked",
+                "mode-toggle-unlocked": item.action === "toggle-mode" && props.state.mode !== "locked",
               }}
               onClick={() => {
                 if (item.menu) props.actions.openCommandMenu(item.menu);
@@ -39,6 +33,9 @@ export default function CommandBar(props) {
               }}
             >
               {item.key ? <kbd>{item.key}</kbd> : null}
+              {item.action === "toggle-mode" ? (
+                <span class="command-item-separator" aria-hidden="true">&gt;</span>
+              ) : null}
               <span>{item.label}</span>
             </button>
           )}

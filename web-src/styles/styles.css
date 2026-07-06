@@ -186,7 +186,7 @@ button {
   display: grid;
   min-width: 0;
   align-items: center;
-  padding: 0 8px;
+  padding: 0 0px;
 }
 
 .session-select {
@@ -395,7 +395,7 @@ button {
 
 .command-bar {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   position: relative;
   z-index: 12;
@@ -485,28 +485,6 @@ button {
   font-weight: 700;
 }
 
-.mode-pill {
-  display: grid;
-  min-width: 82px;
-  height: var(--bar-control-height);
-  place-items: center;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.mode-pill.locked {
-  border: 1px solid var(--connection-border);
-  color: var(--amber);
-  background: var(--primary-bg);
-}
-
-.mode-pill.unlocked {
-  border: 1px solid var(--cyan-border);
-  color: var(--cyan);
-  background: var(--cyan-bg);
-}
-
 .command-items {
   display: flex;
   min-width: 0;
@@ -543,6 +521,40 @@ button {
   color: var(--cyan);
 }
 
+.command-item.mode-toggle {
+  font-weight: 700;
+}
+
+.command-item.mode-toggle-locked {
+  border-color: var(--connection-border);
+  background: var(--primary-bg);
+  color: var(--amber);
+}
+
+.command-item.mode-toggle-unlocked {
+  border-color: var(--cyan-border);
+  background: var(--cyan-bg);
+  color: var(--cyan);
+}
+
+.command-item.mode-toggle-locked:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-bg);
+  color: var(--amber);
+}
+
+.command-item.mode-toggle-unlocked:hover {
+  border-color: var(--command-item-active-border);
+  background: var(--command-item-active-bg);
+  color: var(--cyan);
+}
+
+.command-item-separator {
+  color: currentColor;
+  font-weight: 700;
+  opacity: 0.75;
+}
+
 .command-item kbd {
   border-color: var(--command-key-border);
   background: var(--command-key-bg);
@@ -552,6 +564,12 @@ button {
 
 .command-item.active kbd {
   border-color: var(--command-item-active-border);
+  background: var(--cyan-bg);
+  color: var(--cyan);
+}
+
+.command-item.mode-toggle-unlocked kbd {
+  border-color: var(--cyan-border);
   background: var(--cyan-bg);
   color: var(--cyan);
 }
@@ -905,10 +923,6 @@ kbd {
 
   .command-bar.command-bar-locked {
     min-height: calc(var(--mobile-command-bar-height) + var(--safe-area-bottom));
-  }
-
-  .mode-pill {
-    display: none;
   }
 
   .sticky-toggle {

@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const RESPONSIVE_LAYOUT_STORE_VERSION: u32 = 1;
 const RESPONSIVE_LAYOUT_STORE_FILE: &str = "tmux-web-responsive-layouts.json";
+const TMUX_FIELD_SEPARATOR: &str = "::tmux-web::";
 
 #[derive(Clone, Debug)]
 pub struct TmuxConfig {
@@ -161,7 +162,13 @@ impl TmuxConfig {
             .command()
             .arg("list-sessions")
             .arg("-F")
-            .arg("#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_last_attached}")
+            .arg(tmux_format(&[
+                "#{session_name}",
+                "#{session_windows}",
+                "#{session_attached}",
+                "#{session_created}",
+                "#{session_last_attached}",
+            ]))
             .output()
             .await
             .context("failed to execute tmux list-sessions")?;
@@ -175,23 +182,11 @@ impl TmuxConfig {
         }
 
         let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
-        let mut sessions = Vec::new();
-        for line in stdout.lines().filter(|line| !line.is_empty()) {
-            let mut parts = line.splitn(5, '\t');
-            let Some(name) = parts.next() else { continue };
-            let windows = parse_u32(parts.next());
-            let attached = parse_u32(parts.next());
-            let created = parse_u64(parts.next());
-            let last_attached = parse_u64(parts.next());
-            sessions.push(TmuxSession {
-                name: name.to_string(),
-                windows,
-                attached,
-                created,
-                last_attached,
-            });
-        }
-        Ok(sessions)
+        stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(parse_session_line)
+            .collect()
     }
 
     pub async fn list_panes_for_window(
@@ -313,7 +308,15 @@ impl TmuxConfig {
             .arg("-t")
             .arg(session_name)
             .arg("-F")
-            .arg("#{session_id}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_panes}\t#{window_zoomed_flag}")
+            .arg(tmux_format(&[
+                "#{session_id}",
+                "#{window_id}",
+                "#{window_index}",
+                "#{window_active}",
+                "#{window_panes}",
+                "#{window_zoomed_flag}",
+                "#{window_name}",
+            ]))
             .output()
             .await
             .context("failed to execute tmux list-windows")?;
@@ -430,7 +433,14 @@ impl TmuxConfig {
             .arg("-t")
             .arg(target)
             .arg("-F")
-            .arg("#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{pane_active}")
+            .arg(tmux_format(&[
+                "#{pane_id}",
+                "#{pane_left}",
+                "#{pane_top}",
+                "#{pane_width}",
+                "#{pane_height}",
+                "#{pane_active}",
+            ]))
             .output()
             .await
             .context("failed to execute tmux list-panes")?;
@@ -459,7 +469,7 @@ impl TmuxConfig {
             .arg("-p")
             .arg("-t")
             .arg(session_name)
-            .arg("#{window_id}\t#{window_zoomed_flag}")
+            .arg(tmux_format(&["#{window_id}", "#{window_zoomed_flag}"]))
             .output()
             .await
             .context("failed to execute tmux display-message")?;
@@ -547,7 +557,16 @@ impl TmuxConfig {
             .arg("-p")
             .arg("-t")
             .arg(session_name)
-            .arg("#{session_name}\t#{session_id}\t#{window_id}\t#{window_index}\t#{window_layout}\t#{window_zoomed_flag}\t#{pane_id}\t#{window_name}")
+            .arg(tmux_format(&[
+                "#{session_name}",
+                "#{session_id}",
+                "#{window_id}",
+                "#{window_index}",
+                "#{window_layout}",
+                "#{window_zoomed_flag}",
+                "#{pane_id}",
+                "#{window_name}",
+            ]))
             .output()
             .await
             .context("failed to execute tmux display-message")?;
@@ -832,6 +851,10 @@ fn generated_session_name() -> String {
     format!("web-{suffix}")
 }
 
+fn tmux_format(fields: &[&str]) -> String {
+    fields.join(TMUX_FIELD_SEPARATOR)
+}
+
 fn parse_u32(value: Option<&str>) -> u32 {
     value.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
@@ -840,12 +863,41 @@ fn parse_u64(value: Option<&str>) -> u64 {
     value.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
+fn parse_required_u32(value: &str) -> Result<u32> {
+    value
+        .parse()
+        .with_context(|| format!("unexpected tmux integer output: {value:?}"))
+}
+
+fn parse_required_u64(value: &str) -> Result<u64> {
+    value
+        .parse()
+        .with_context(|| format!("unexpected tmux integer output: {value:?}"))
+}
+
 fn parse_u16(value: Option<&str>) -> u16 {
     value.and_then(|value| value.parse().ok()).unwrap_or(0)
 }
 
+fn parse_session_line(line: &str) -> Result<TmuxSession> {
+    let mut parts = line.splitn(5, TMUX_FIELD_SEPARATOR);
+    let name = required_part(&mut parts, "session_name")?;
+    let windows = parse_required_u32(&required_part(&mut parts, "session_windows")?)?;
+    let attached = parse_required_u32(&required_part(&mut parts, "session_attached")?)?;
+    let created = parse_required_u64(&required_part(&mut parts, "session_created")?)?;
+    let last_attached = parse_u64(parts.next());
+
+    Ok(TmuxSession {
+        name,
+        windows,
+        attached,
+        created,
+        last_attached,
+    })
+}
+
 fn parse_pane_line(line: &str) -> Option<TmuxPane> {
-    let mut parts = line.splitn(6, '\t');
+    let mut parts = line.splitn(6, TMUX_FIELD_SEPARATOR);
     let id = parts.next()?;
     Some(TmuxPane {
         id: id.to_string(),
@@ -858,14 +910,14 @@ fn parse_pane_line(line: &str) -> Option<TmuxPane> {
 }
 
 fn parse_window_entry_line(line: &str) -> Result<TmuxWindowEntry> {
-    let mut parts = line.splitn(7, '\t');
+    let mut parts = line.splitn(7, TMUX_FIELD_SEPARATOR);
     let session_id = required_part(&mut parts, "session_id")?;
     let id = required_part(&mut parts, "window_id")?;
     let index = parse_u32(Some(&required_part(&mut parts, "window_index")?));
-    let name = required_part(&mut parts, "window_name")?;
     let active = parse_bool_flag(&required_part(&mut parts, "window_active")?)?;
     let panes = parse_u32(Some(&required_part(&mut parts, "window_panes")?));
     let zoomed = parse_window_zoomed_flag(&required_part(&mut parts, "window_zoomed_flag")?)?;
+    let name = parts.next().unwrap_or_default().to_string();
 
     Ok(TmuxWindowEntry {
         session_id,
@@ -881,7 +933,7 @@ fn parse_window_entry_line(line: &str) -> Result<TmuxWindowEntry> {
 }
 
 fn parse_window_zoom_state(value: &str) -> Result<TmuxWindowZoomState> {
-    let mut parts = value.trim().splitn(2, '\t');
+    let mut parts = value.trim().splitn(2, TMUX_FIELD_SEPARATOR);
     let _id = parts
         .next()
         .filter(|id| !id.is_empty())
@@ -891,7 +943,7 @@ fn parse_window_zoom_state(value: &str) -> Result<TmuxWindowZoomState> {
 }
 
 fn parse_current_window_state(value: &str) -> Result<TmuxCurrentWindowState> {
-    let mut parts = value.trim().splitn(8, '\t');
+    let mut parts = value.trim().splitn(8, TMUX_FIELD_SEPARATOR);
     let session_name = required_part(&mut parts, "session_name")?;
     let session_id = required_part(&mut parts, "session_id")?;
     let window_id = required_part(&mut parts, "window_id")?;
@@ -1038,8 +1090,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_tmux_session_format() {
+        let output = tmux_format(&["cnm", "1", "0", "1783301478", ""]);
+        let session = parse_session_line(&output).expect("session should parse");
+
+        assert_eq!(session.name, "cnm");
+        assert_eq!(session.windows, 1);
+        assert_eq!(session.attached, 0);
+        assert_eq!(session.created, 1783301478);
+        assert_eq!(session.last_attached, 0);
+    }
+
+    #[test]
+    fn rejects_malformed_tmux_session_format() {
+        assert!(parse_session_line("cnm_1_0_1783301478_").is_err());
+    }
+
+    #[test]
     fn parses_tmux_pane_geometry() {
-        let pane = parse_pane_line("%3\t81\t0\t79\t24\t1").expect("pane should parse");
+        let output = tmux_format(&["%3", "81", "0", "79", "24", "1"]);
+        let pane = parse_pane_line(&output).expect("pane should parse");
         assert_eq!(pane.id, "%3");
         assert_eq!(pane.left, 81);
         assert_eq!(pane.top, 0);
@@ -1081,15 +1151,16 @@ mod tests {
 
     #[test]
     fn parses_tmux_window_zoom_state() {
-        let state = parse_window_zoom_state("@2\t1\n").expect("zoom state should parse");
+        let output = format!("{}\n", tmux_format(&["@2", "1"]));
+        let state = parse_window_zoom_state(&output).expect("zoom state should parse");
         assert!(state.zoomed);
-        assert!(parse_window_zoom_state("\t1").is_err());
+        assert!(parse_window_zoom_state(&tmux_format(&["", "1"])).is_err());
     }
 
     #[test]
     fn parses_tmux_window_entry_line() {
-        let entry = parse_window_entry_line("$1\t@2\t3\tshell\t1\t4\t0")
-            .expect("window entry should parse");
+        let output = tmux_format(&["$1", "@2", "3", "1", "4", "0", "shell"]);
+        let entry = parse_window_entry_line(&output).expect("window entry should parse");
 
         assert_eq!(entry.session_id, "$1");
         assert_eq!(entry.window.id, "@2");
@@ -1098,13 +1169,28 @@ mod tests {
         assert!(entry.window.active);
         assert_eq!(entry.window.panes, 4);
         assert!(!entry.window.zoomed);
-        assert!(parse_window_entry_line("$1\t@2\t3\tshell\tactive\t4\t0").is_err());
+        assert!(parse_window_entry_line(&tmux_format(&[
+            "$1", "@2", "3", "active", "4", "0", "shell"
+        ]))
+        .is_err());
     }
 
     #[test]
     fn parses_tmux_current_window_state() {
-        let state = parse_current_window_state("dev\t$1\t@2\t3\tb25d,120x30,0,0,0\t0\t%4\tshell\n")
-            .expect("current window state should parse");
+        let output = format!(
+            "{}\n",
+            tmux_format(&[
+                "dev",
+                "$1",
+                "@2",
+                "3",
+                "b25d,120x30,0,0,0",
+                "0",
+                "%4",
+                "shell"
+            ])
+        );
+        let state = parse_current_window_state(&output).expect("current window state should parse");
 
         assert_eq!(state.session_name, "dev");
         assert_eq!(state.session_id, "$1");

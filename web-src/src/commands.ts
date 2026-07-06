@@ -15,9 +15,9 @@ export const LOCKED_COMMAND_ITEMS: CommandItem[] = [
 
 export const UNLOCKED_COMMAND_ITEMS: CommandItem[] = [
   { key: "Ctrl+g", label: "Lock", action: "toggle-mode" },
-  { key: "s", label: "Session", menu: "session" },
   { key: "p", label: "Pane", menu: "pane" },
   { key: "w", label: "Window", menu: "window" },
+  { key: "s", label: "Session", menu: "session" },
   { label: "Panes", action: "pane-list", mobileOnly: true },
   { key: "?", label: "Help", menu: "help" },
 ];
