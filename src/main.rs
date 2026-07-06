@@ -18,12 +18,12 @@ use pty::{TerminalSize, TransferRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    io::ErrorKind,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Component, Path as FsPath, PathBuf},
     sync::Arc,
 };
 use tmux::{TmuxConfig, TmuxSession};
-use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -67,6 +67,7 @@ struct AppState {
     tmux: TmuxConfig,
     transfers: TransferRegistry,
     theme_config: ThemeConfig,
+    static_dir: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +140,7 @@ async fn main() -> Result<()> {
         tmux: TmuxConfig::new(args.tmux.clone(), args.socket_path.clone()),
         transfers: TransferRegistry::default(),
         theme_config,
+        static_dir: args.static_dir.clone(),
     };
 
     let app = Router::new()
@@ -152,17 +154,9 @@ async fn main() -> Result<()> {
             delete(kill_session).put(rename_session),
         )
         .route("/ws/terminal", get(terminal_ws))
-        .route("/ws/trzsz", get(trzsz_ws));
-
-    let app = if let Some(static_dir) = &args.static_dir {
-        let index_file = static_dir.join("index.html");
-        app.fallback_service(
-            ServeDir::new(static_dir.clone()).not_found_service(ServeFile::new(index_file)),
-        )
-    } else {
-        app.fallback(embedded_static)
-    }
-    .with_state(Arc::new(state));
+        .route("/ws/trzsz", get(trzsz_ws))
+        .fallback(static_response)
+        .with_state(Arc::new(state));
 
     let addr = SocketAddr::new(args.host, args.port);
     eprintln!("tmux-web listening on http://{addr}");
@@ -404,6 +398,84 @@ async fn trzsz_ws(
     ws.on_upgrade(move |socket| pty::run_trzsz_transfer(socket, state.transfers.clone(), query.id))
 }
 
+async fn static_response(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if let Some(static_dir) = &state.static_dir {
+        return static_dir_response(static_dir, &uri).await;
+    }
+
+    embedded_static(headers, uri).await
+}
+
+async fn static_dir_response(static_dir: &FsPath, uri: &Uri) -> Response {
+    let path = request_asset_path(uri);
+    if let Some(response) = read_static_file(static_dir, path).await {
+        return response;
+    }
+
+    if path == "index.html" {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    read_static_file(static_dir, "index.html")
+        .await
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+async fn read_static_file(static_dir: &FsPath, request_path: &str) -> Option<Response> {
+    let path = safe_static_path(static_dir, request_path)?;
+    match tokio::fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return None,
+        Err(error) if error.kind() == ErrorKind::NotFound => return None,
+        Err(error) => return Some(internal_static_error(error)),
+    }
+
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Some(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime_for(request_path))
+                .body(Body::from(bytes))
+                .expect("static file response should be valid"),
+        ),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => Some(internal_static_error(error)),
+    }
+}
+
+fn request_asset_path(uri: &Uri) -> &str {
+    let path = uri.path().trim_start_matches('/');
+    if path.is_empty() {
+        "index.html"
+    } else {
+        path
+    }
+}
+
+fn safe_static_path(root: &FsPath, request_path: &str) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in FsPath::new(request_path).components() {
+        match component {
+            Component::Normal(component) => path.push(component),
+            Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => return None,
+        }
+    }
+    Some(path)
+}
+
+fn internal_static_error(error: std::io::Error) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("failed to read static file: {error}"),
+    )
+        .into_response()
+}
+
 async fn embedded_static(headers: HeaderMap, uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
@@ -443,6 +515,29 @@ async fn embedded_static(headers: HeaderMap, uri: Uri) -> Response {
     response
         .body(Body::from(Bytes::from_static(asset.bytes)))
         .expect("embedded asset response should be valid")
+}
+
+fn mime_for(path: &str) -> &'static str {
+    match FsPath::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+    {
+        "css" => "text/css; charset=utf-8",
+        "gif" => "image/gif",
+        "html" => "text/html; charset=utf-8",
+        "ico" => "image/x-icon",
+        "jpg" | "jpeg" => "image/jpeg",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "svg" => "image/svg+xml",
+        "wasm" => "application/wasm",
+        "webp" => "image/webp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
 }
 
 fn accepts_gzip(headers: &HeaderMap) -> bool {
@@ -559,6 +654,20 @@ mod tests {
         );
 
         assert!(!accepts_gzip(&headers));
+    }
+
+    #[test]
+    fn safe_static_path_joins_normal_components() {
+        assert_eq!(
+            safe_static_path(FsPath::new("/srv/tmux-web"), "assets/index.js"),
+            Some(PathBuf::from("/srv/tmux-web/assets/index.js"))
+        );
+    }
+
+    #[test]
+    fn safe_static_path_rejects_parent_components() {
+        assert!(safe_static_path(FsPath::new("/srv/tmux-web"), "../secret").is_none());
+        assert!(safe_static_path(FsPath::new("/srv/tmux-web"), "assets/../../secret").is_none());
     }
 
     #[test]
