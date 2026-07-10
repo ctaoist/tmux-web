@@ -14,7 +14,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
-use pty::{TerminalSize, TransferRegistry};
+use pty::{ResponsiveLayoutRegistry, TerminalSize, TransferRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -66,6 +66,7 @@ struct AppState {
     auth: AuthState,
     tmux: TmuxConfig,
     transfers: TransferRegistry,
+    responsive_layouts: ResponsiveLayoutRegistry,
     theme_config: ThemeConfig,
     static_dir: Option<PathBuf>,
 }
@@ -139,6 +140,7 @@ async fn main() -> Result<()> {
         auth: AuthState::new(token.clone(), false),
         tmux: TmuxConfig::new(args.tmux.clone(), args.socket_path.clone()),
         transfers: TransferRegistry::default(),
+        responsive_layouts: ResponsiveLayoutRegistry::default(),
         theme_config,
         static_dir: args.static_dir.clone(),
     };
@@ -337,16 +339,11 @@ async fn kill_session(
     Path(name): Path<String>,
 ) -> ApiResult<MeResponse> {
     require_auth(&headers, &state)?;
-    state
-        .tmux
-        .kill_session(&name)
-        .await
-        .map(|_| {
-            Json(MeResponse {
-                authenticated: true,
-            })
-        })
-        .map_err(bad_request)
+    state.tmux.kill_session(&name).await.map_err(bad_request)?;
+    state.responsive_layouts.remove_session(&name).await;
+    Ok(Json(MeResponse {
+        authenticated: true,
+    }))
 }
 
 async fn rename_session(
@@ -356,12 +353,14 @@ async fn rename_session(
     Json(request): Json<RenameSessionRequest>,
 ) -> ApiResult<SessionResponse> {
     require_auth(&headers, &state)?;
-    state
+    let session = state
         .tmux
         .rename_session(&name, request.name.trim())
         .await
-        .map(|session| Json(SessionResponse { session }))
-        .map_err(bad_request)
+        .map_err(bad_request)?;
+    state.responsive_layouts.remove_session(&name).await;
+    state.responsive_layouts.remove_session(&session.name).await;
+    Ok(Json(SessionResponse { session }))
 }
 
 async fn terminal_ws(
@@ -379,6 +378,7 @@ async fn terminal_ws(
             socket,
             state.tmux.clone(),
             state.transfers.clone(),
+            state.responsive_layouts.clone(),
             query.session,
             size,
             query.transfer_id,

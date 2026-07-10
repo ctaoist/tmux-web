@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -69,7 +69,7 @@ enum ClientTerminalMessage {
     },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum ClientKind {
     Mobile,
@@ -126,6 +126,21 @@ struct AttachInfo {
 }
 
 #[derive(Clone, Default)]
+pub struct ResponsiveLayoutRegistry {
+    inner: Arc<AsyncMutex<HashMap<String, ClientKind>>>,
+}
+
+impl ResponsiveLayoutRegistry {
+    pub async fn remove_session(&self, session_name: &str) {
+        self.inner.lock().await.remove(session_name);
+    }
+
+    async fn invalidate(&self, session_name: &str) {
+        self.remove_session(session_name).await;
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct TransferRegistry {
     inner: Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>,
 }
@@ -173,12 +188,21 @@ pub async fn run_terminal(
     socket: WebSocket,
     tmux: TmuxConfig,
     transfers: TransferRegistry,
+    responsive_layouts: ResponsiveLayoutRegistry,
     session_name: String,
     size: TerminalSize,
     transfer_id: Option<String>,
 ) {
-    if let Err(error) =
-        run_terminal_inner(socket, tmux, transfers, session_name, size, transfer_id).await
+    if let Err(error) = run_terminal_inner(
+        socket,
+        tmux,
+        transfers,
+        responsive_layouts,
+        session_name,
+        size,
+        transfer_id,
+    )
+    .await
     {
         eprintln!("terminal websocket failed: {error:#}");
     }
@@ -188,6 +212,7 @@ async fn run_terminal_inner(
     mut socket: WebSocket,
     tmux: TmuxConfig,
     transfers: TransferRegistry,
+    responsive_layouts: ResponsiveLayoutRegistry,
     session_name: String,
     size: TerminalSize,
     transfer_id: Option<String>,
@@ -201,7 +226,13 @@ async fn run_terminal_inner(
     {
         eprintln!("failed to apply pane border theme before attach: {error:#}");
     }
-    apply_responsive_layout_for_client(&tmux, &session_name, attach.client_kind).await?;
+    apply_responsive_layout_if_context_changed(
+        &responsive_layouts,
+        &tmux,
+        &session_name,
+        attach.client_kind,
+    )
+    .await?;
     let size = attach.size;
     let default_client_kind = attach.client_kind;
 
@@ -268,7 +299,8 @@ async fn run_terminal_inner(
                         let parsed = serde_json::from_str::<ClientTerminalMessage>(&text);
                         match parsed {
                             Ok(ClientTerminalMessage::Input { data }) => {
-                                if let Err(error) = apply_responsive_layout_for_client(
+                                if let Err(error) = apply_responsive_layout_if_context_changed(
+                                    &responsive_layouts,
                                     &tmux,
                                     &session_name,
                                     default_client_kind,
@@ -283,7 +315,8 @@ async fn run_terminal_inner(
                                 let _ = writer.flush();
                             }
                             Ok(ClientTerminalMessage::Resize { cols, rows }) => {
-                                if let Err(error) = apply_responsive_layout_for_client(
+                                if let Err(error) = apply_responsive_layout_if_context_changed(
+                                    &responsive_layouts,
                                     &tmux,
                                     &session_name,
                                     default_client_kind,
@@ -307,6 +340,7 @@ async fn run_terminal_inner(
                                     &session_name,
                                     default_client_kind,
                                     &mut pane_border_theme,
+                                    &responsive_layouts,
                                     message,
                                 )
                                 .await
@@ -320,7 +354,8 @@ async fn run_terminal_inner(
                         }
                     }
                     Message::Binary(bytes) => {
-                        if let Err(error) = apply_responsive_layout_for_client(
+                        if let Err(error) = apply_responsive_layout_if_context_changed(
+                            &responsive_layouts,
                             &tmux,
                             &session_name,
                             default_client_kind,
@@ -460,12 +495,18 @@ async fn control_response(
     session_name: &str,
     default_client_kind: ClientKind,
     pane_border_theme: &mut TmuxPaneBorderTheme,
+    responsive_layouts: &ResponsiveLayoutRegistry,
     message: ClientTerminalMessage,
 ) -> Option<String> {
     match message {
         ClientTerminalMessage::ClientActivity => {
-            if let Err(error) =
-                apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await
+            if let Err(error) = apply_responsive_layout_if_context_changed(
+                responsive_layouts,
+                tmux,
+                session_name,
+                default_client_kind,
+            )
+            .await
             {
                 eprintln!("failed to apply responsive layout for client activity: {error:#}");
             }
@@ -501,6 +542,9 @@ async fn control_response(
             } else {
                 tmux.set_window_zoomed(session_name, zoomed).await
             };
+            if result.is_ok() {
+                responsive_layouts.invalidate(session_name).await;
+            }
             let response = match result {
                 Ok(zoomed) => control_ok(&request_id, serde_json::json!({ "zoomed": zoomed })),
                 Err(error) => control_error(&request_id, &error),
@@ -508,7 +552,11 @@ async fn control_response(
             Some(response)
         }
         ClientTerminalMessage::ClearAutoZoom { request_id } => {
-            let response = match tmux.clear_responsive_window_zoomed(session_name).await {
+            let result = tmux.clear_responsive_window_zoomed(session_name).await;
+            if result.is_ok() {
+                responsive_layouts.invalidate(session_name).await;
+            }
+            let response = match result {
                 Ok(()) => control_ok(&request_id, serde_json::json!({})),
                 Err(error) => control_error(&request_id, &error),
             };
@@ -519,7 +567,13 @@ async fn control_response(
             window_id,
         } => {
             let result = async {
-                apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await?;
+                apply_responsive_layout_for_client_and_record(
+                    responsive_layouts,
+                    tmux,
+                    session_name,
+                    default_client_kind,
+                )
+                .await?;
                 tmux.list_panes_for_window(session_name, &window_id).await
             }
             .await;
@@ -536,15 +590,25 @@ async fn control_response(
         } => {
             let result = async {
                 if !default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 let pane = tmux
                     .select_pane_in_window(session_name, &window_id, &pane_id)
                     .await?;
                 if default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 Ok(pane)
             }
@@ -557,7 +621,13 @@ async fn control_response(
         }
         ClientTerminalMessage::ListWindows { request_id } => {
             let result = async {
-                apply_responsive_layout_for_client(tmux, session_name, default_client_kind).await?;
+                apply_responsive_layout_for_client_and_record(
+                    responsive_layouts,
+                    tmux,
+                    session_name,
+                    default_client_kind,
+                )
+                .await?;
                 tmux.list_windows(session_name).await
             }
             .await;
@@ -570,15 +640,25 @@ async fn control_response(
         ClientTerminalMessage::CreateWindow { request_id, name } => {
             let result = async {
                 if !default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 let window = tmux.create_window(session_name, name).await?;
                 tmux.apply_pane_border_theme_to_window(&window.id, pane_border_theme)
                     .await?;
                 if default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 Ok(window)
             }
@@ -595,15 +675,25 @@ async fn control_response(
         } => {
             let result = async {
                 if !default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 let window = tmux.select_window(session_name, &window_id).await?;
                 tmux.apply_pane_border_theme_to_window(&window.id, pane_border_theme)
                     .await?;
                 if default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 Ok(window)
             }
@@ -620,14 +710,23 @@ async fn control_response(
         } => {
             let result = async {
                 if !default_client_kind.should_zoom() {
-                    apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                        .await?;
+                    apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await?;
                 }
                 tmux.kill_window(session_name, &window_id).await?;
                 if default_client_kind.should_zoom() {
-                    let _ =
-                        apply_responsive_layout_for_client(tmux, session_name, default_client_kind)
-                            .await;
+                    let _ = apply_responsive_layout_for_client_and_record(
+                        responsive_layouts,
+                        tmux,
+                        session_name,
+                        default_client_kind,
+                    )
+                    .await;
                 }
                 Ok(())
             }
@@ -651,6 +750,34 @@ async fn apply_responsive_layout_for_client(
 ) -> Result<()> {
     tmux.set_responsive_window_zoomed(session_name, client_kind.should_zoom())
         .await?;
+    Ok(())
+}
+
+async fn apply_responsive_layout_if_context_changed(
+    responsive_layouts: &ResponsiveLayoutRegistry,
+    tmux: &TmuxConfig,
+    session_name: &str,
+    client_kind: ClientKind,
+) -> Result<()> {
+    let mut contexts = responsive_layouts.inner.lock().await;
+    if contexts.get(session_name) == Some(&client_kind) {
+        return Ok(());
+    }
+
+    apply_responsive_layout_for_client(tmux, session_name, client_kind).await?;
+    contexts.insert(session_name.to_string(), client_kind);
+    Ok(())
+}
+
+async fn apply_responsive_layout_for_client_and_record(
+    responsive_layouts: &ResponsiveLayoutRegistry,
+    tmux: &TmuxConfig,
+    session_name: &str,
+    client_kind: ClientKind,
+) -> Result<()> {
+    let mut contexts = responsive_layouts.inner.lock().await;
+    apply_responsive_layout_for_client(tmux, session_name, client_kind).await?;
+    contexts.insert(session_name.to_string(), client_kind);
     Ok(())
 }
 

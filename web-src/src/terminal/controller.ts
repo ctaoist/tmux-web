@@ -808,6 +808,7 @@ export function createTerminalController({
 
   function notePointerActivation() {
     runtime.lastPointerActivationAt = performance.now();
+    scheduleClientActivity();
   }
 
   function isRecentPointerActivation() {
