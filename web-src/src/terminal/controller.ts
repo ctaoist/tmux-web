@@ -14,6 +14,11 @@ type TmuxWebSocket = WebSocket & {
 const CLIENT_ACTIVITY_THROTTLE_MS = 250;
 const POINTER_ACTIVATION_SUPPRESS_MS = 600;
 const TERMINAL_METRICS_DEBUG_KEY = "tmux-web-debug-terminal-metrics";
+const INPUT_BATCH_WINDOW_MS = 16;
+const INPUT_BACKPRESSURE_RETRY_MS = 50;
+const INPUT_BUFFERED_AMOUNT_HIGH_WATER_MARK = 128 * 1024;
+const INPUT_QUEUE_MAX_BYTES = 256 * 1024;
+const inputTextEncoder = new TextEncoder();
 
 export function createTerminalController({
   state,
@@ -52,6 +57,10 @@ export function createTerminalController({
     lastResizeCols: 0,
     lastResizeRows: 0,
     terminalMetricsLogged: false,
+    pendingTerminalInput: [],
+    pendingTerminalInputBytes: 0,
+    inputFlushTimer: 0,
+    inputQueueOverflow: false,
   };
 
   function mount(element) {
@@ -147,6 +156,9 @@ export function createTerminalController({
   function connect(runId, sessionName = state.activeSession) {
     if (!sessionName || !runtime.terminal) return;
 
+    clearQueuedTerminalInput();
+    runtime.inputQueueOverflow = false;
+
     setState({
       reconnectPending: false,
       connectionStatus: state.hasDisconnected ? "reconnecting" : "connecting",
@@ -210,12 +222,16 @@ export function createTerminalController({
       runtime.trzszBridge = null;
       if (socket._tmuxWebIntentionalClose) return;
       rejectTerminalControlRequests(new Error("terminal websocket closed"));
+      const connectionMessage = runtime.inputQueueOverflow
+        ? "Network congested. Reconnect to continue"
+        : event.code ? `Connection closed (${event.code})` : "Connection closed";
+      runtime.inputQueueOverflow = false;
       setState({
         connected: false,
         connectionStatus: "disconnected",
         reconnectPending: true,
         hasDisconnected: true,
-        connectionMessage: event.code ? `Connection closed (${event.code})` : "Connection closed",
+        connectionMessage,
         connectionTransient: false,
       });
       focus();
@@ -256,6 +272,10 @@ export function createTerminalController({
 
   function close({ disposeTerminal = true, intentional = true } = {}) {
     runtime.connectionRunId += 1;
+    clearQueuedTerminalInput();
+    if (intentional) {
+      runtime.inputQueueOverflow = false;
+    }
     if (runtime.socket) {
       runtime.socket._tmuxWebIntentionalClose = intentional;
       runtime.socket.close();
@@ -387,11 +407,75 @@ export function createTerminalController({
   function sendTerminalInput(data) {
     const socket = runtime.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
-    if (typeof data === "string") {
-      socket.send(JSON.stringify({ type: "input", data }));
-    } else {
-      socket.send(data);
+    enqueueTerminalInput(data);
+  }
+
+  function enqueueTerminalInput(data) {
+    const bytes = inputByteLength(data);
+    if (runtime.pendingTerminalInputBytes + bytes > INPUT_QUEUE_MAX_BYTES) {
+      failCongestedInput();
+      return;
     }
+
+    const pending = runtime.pendingTerminalInput;
+    const previous = pending[pending.length - 1];
+    if (typeof data === "string" && typeof previous === "string") {
+      pending[pending.length - 1] = previous + data;
+    } else {
+      pending.push(data);
+    }
+    runtime.pendingTerminalInputBytes += bytes;
+    scheduleTerminalInputFlush(INPUT_BATCH_WINDOW_MS);
+  }
+
+  function inputByteLength(data) {
+    return typeof data === "string" ? inputTextEncoder.encode(data).byteLength : data.byteLength;
+  }
+
+  function scheduleTerminalInputFlush(delay) {
+    if (runtime.inputFlushTimer) return;
+    runtime.inputFlushTimer = window.setTimeout(() => {
+      runtime.inputFlushTimer = 0;
+      flushTerminalInput();
+    }, delay);
+  }
+
+  function flushTerminalInput() {
+    const socket = runtime.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      clearQueuedTerminalInput();
+      return;
+    }
+
+    while (runtime.pendingTerminalInput.length > 0) {
+      if (socket.bufferedAmount >= INPUT_BUFFERED_AMOUNT_HIGH_WATER_MARK) {
+        scheduleTerminalInputFlush(INPUT_BACKPRESSURE_RETRY_MS);
+        return;
+      }
+
+      const data = runtime.pendingTerminalInput.shift();
+      runtime.pendingTerminalInputBytes -= inputByteLength(data);
+      if (typeof data === "string") {
+        socket.send(JSON.stringify({ type: "input", data }));
+      } else {
+        socket.send(data);
+      }
+    }
+  }
+
+  function clearQueuedTerminalInput() {
+    clearTimeout(runtime.inputFlushTimer);
+    runtime.inputFlushTimer = 0;
+    runtime.pendingTerminalInput.length = 0;
+    runtime.pendingTerminalInputBytes = 0;
+  }
+
+  function failCongestedInput() {
+    const socket = runtime.socket;
+    clearQueuedTerminalInput();
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    runtime.inputQueueOverflow = true;
+    socket.close(1013, "terminal input queue exceeded limit");
   }
 
   function processServerOutput(data) {
