@@ -4,11 +4,12 @@ mod static_assets;
 mod tmux;
 
 use anyhow::{anyhow, Context, Result};
-use auth::AuthState;
+use auth::{AuthState, LoginAttemptTracker};
 use axum::{
     body::{Body, Bytes},
-    extract::{ws::WebSocketUpgrade, Path, Query, State},
+    extract::{connect_info::ConnectInfo, ws::WebSocketUpgrade, Path, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -55,6 +56,21 @@ struct Args {
     #[arg(long, env = "TMUX_WEB_TOKEN_FILE")]
     token_file: Option<PathBuf>,
 
+    #[arg(
+        long = "error-count",
+        visible_alias = "token-error-count",
+        env = "TMUX_WEB_ERROR_COUNT",
+        default_value_t = 0
+    )]
+    error_count: usize,
+
+    #[arg(
+        long = "black-file",
+        visible_alias = "blacklist-file",
+        env = "TMUX_WEB_BLACK_FILE"
+    )]
+    black_file: Option<PathBuf>,
+
     #[arg(long)]
     static_dir: Option<PathBuf>,
 }
@@ -64,6 +80,7 @@ type ThemeConfig = Value;
 #[derive(Clone)]
 struct AppState {
     auth: AuthState,
+    login_attempts: Option<LoginAttemptTracker>,
     tmux: TmuxConfig,
     transfers: TransferRegistry,
     responsive_layouts: ResponsiveLayoutRegistry,
@@ -130,6 +147,7 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 async fn main() -> Result<()> {
     let args = Args::parse();
     let token = load_token(&args)?;
+    let login_attempts = load_login_attempt_tracker(&args)?;
     let theme_config = load_theme_config(&args.theme)?;
     let theme_name = theme_config
         .get("theme")
@@ -138,6 +156,7 @@ async fn main() -> Result<()> {
         .to_string();
     let state = AppState {
         auth: AuthState::new(token.clone(), false),
+        login_attempts,
         tmux: TmuxConfig::new(args.tmux.clone(), args.socket_path.clone()),
         transfers: TransferRegistry::default(),
         responsive_layouts: ResponsiveLayoutRegistry::default(),
@@ -145,6 +164,7 @@ async fn main() -> Result<()> {
         static_dir: args.static_dir.clone(),
     };
 
+    let state = Arc::new(state);
     let app = Router::new()
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
@@ -158,7 +178,11 @@ async fn main() -> Result<()> {
         .route("/ws/terminal", get(terminal_ws))
         .route("/ws/trzsz", get(trzsz_ws))
         .fallback(static_response)
-        .with_state(Arc::new(state));
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state,
+            reject_blacklisted_host,
+        ));
 
     let addr = SocketAddr::new(args.host, args.port);
     eprintln!("tmux-web listening on http://{addr}");
@@ -176,11 +200,27 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("failed to bind HTTP listener")?;
-    axum::serve(listener, app)
-        .await
-        .context("tmux-web server failed")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .context("tmux-web server failed")?;
 
     Ok(())
+}
+
+fn load_login_attempt_tracker(args: &Args) -> Result<Option<LoginAttemptTracker>> {
+    match (args.error_count, &args.black_file) {
+        (0, None) => Ok(None),
+        (0, Some(_)) => Err(anyhow!(
+            "--black-file requires --error-count to be greater than zero"
+        )),
+        (_, None) => Err(anyhow!("--error-count requires --black-file")),
+        (error_count, Some(black_file)) => {
+            LoginAttemptTracker::new(error_count, black_file.clone()).map(Some)
+        }
+    }
 }
 
 fn load_token(args: &Args) -> Result<String> {
@@ -270,13 +310,40 @@ fn require_auth(headers: &HeaderMap, state: &AppState) -> Result<(), (StatusCode
     }
 }
 
+async fn reject_blacklisted_host(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if let Some(login_attempts) = &state.login_attempts {
+        if login_attempts.is_blacklisted(client_addr.ip()).await {
+            return api_error(StatusCode::FORBIDDEN, "host is blacklisted").into_response();
+        }
+    }
+    next.run(request).await
+}
+
 async fn login(
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(request): Json<LoginRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let host = client_addr.ip();
     let Some(cookie) = state.auth.issue_session(request.token.trim()) else {
+        if let Some(login_attempts) = &state.login_attempts {
+            if login_attempts.record_failure(host).await {
+                eprintln!(
+                    "tmux-web blacklisted {host} after {} invalid token attempts",
+                    login_attempts.error_count()
+                );
+            }
+        }
         return Err(api_error(StatusCode::UNAUTHORIZED, "invalid token"));
     };
+    if let Some(login_attempts) = &state.login_attempts {
+        login_attempts.record_success(host).await;
+    }
     let mut response = Json(LoginResponse {
         authenticated: true,
     })

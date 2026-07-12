@@ -74,6 +74,8 @@ TMUX_WEB_HOST=0.0.0.0 TMUX_WEB_PORT=8082 TMUX_WEB_THEME=light cargo run
 | `--socket-path` | | | 传给 `tmux -S` 的 tmux socket 路径。 |
 | `--token` | `TMUX_WEB_TOKEN` | 自动生成 | 登录 token。省略时，tmux-web 会在启动时打印一个新 token。 |
 | `--token-file` | `TMUX_WEB_TOKEN_FILE` | | 从文件读取登录 token。 |
+| `--error-count` | `TMUX_WEB_ERROR_COUNT` | `0`（关闭） | 同一对端 IP 连续输错 token 的次数达到此值后加入黑名单。必须同时设置 `--black-file`。`--token-error-count` 是别名。 |
+| `--black-file` | `TMUX_WEB_BLACK_FILE` | | 黑名单文件路径，每行一个 IP。启动时会加载已有内容，触发拉黑时会追加 IP。必须将 `--error-count` 设为大于零。`--blacklist-file` 是别名。 |
 | `--static-dir` | | 嵌入资源 | 从改目录加载前端文件，而不是使用内嵌的。 |
 
 示例：
@@ -89,7 +91,14 @@ tmux-web --tmux /usr/local/bin/tmux --socket-path /tmp/tmux-custom
 
 # 避免 token 出现在进程参数中。
 tmux-web --token-file /etc/tmux-web/token
+
+# 同一 IP 连续 5 次输错 token 后加入黑名单。
+tmux-web --error-count 5 --black-file /var/lib/tmux-web/blacklist
 ```
+
+登录失败计数使用 TCP 连接的对端 IP；成功登录会清零该 IP 的计数。IP 被拉黑后，
+该 IP 的后续所有请求都会被拒绝。如果 tmux-web 部署在反向代理之后，它看到的对端
+会是代理，因此请在代理层限制访问，或直接部署 tmux-web。
 
 ## 主题
 

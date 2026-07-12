@@ -81,6 +81,8 @@ TMUX_WEB_HOST=0.0.0.0 TMUX_WEB_PORT=8082 TMUX_WEB_THEME=light cargo run
 | `--socket-path` | | | tmux socket path passed to `tmux -S`. |
 | `--token` | `TMUX_WEB_TOKEN` | generated | Login token. If omitted, tmux-web prints a new startup token. |
 | `--token-file` | `TMUX_WEB_TOKEN_FILE` | | Read the login token from a file. |
+| `--error-count` | `TMUX_WEB_ERROR_COUNT` | `0` (disabled) | Consecutive invalid token attempts from one peer IP before it is blacklisted. Requires `--black-file`. `--token-error-count` is an alias. |
+| `--black-file` | `TMUX_WEB_BLACK_FILE` | | Blacklist file path. One IP address per line; existing entries are loaded and new blacklisted IPs are appended. Requires `--error-count` greater than zero. `--blacklist-file` is an alias. |
 | `--static-dir` | | embedded assets | Load frontend files from this directory instead of the embedded bundle. |
 
 Examples:
@@ -97,7 +99,15 @@ tmux-web --tmux /usr/local/bin/tmux --socket-path /tmp/tmux-custom
 
 # Keep the token outside the process list.
 tmux-web --token-file /etc/tmux-web/token
+
+# Blacklist a peer IP after five consecutive invalid token attempts.
+tmux-web --error-count 5 --black-file /var/lib/tmux-web/blacklist
 ```
+
+The login failure counter uses the TCP peer IP address. A successful login resets
+that address's counter; once blacklisted, all subsequent requests from that IP
+are rejected. If tmux-web is behind a reverse proxy, it sees the proxy as the
+peer, so restrict access at the proxy or run tmux-web directly.
 
 ## Themes
 

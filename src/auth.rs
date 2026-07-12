@@ -1,8 +1,129 @@
+use anyhow::{anyhow, Context, Result};
 use axum::http::{header, HeaderMap, HeaderValue};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    fs::OpenOptions,
+    io::{ErrorKind, Write},
+    net::IpAddr,
+    path::PathBuf,
+    sync::Arc,
+};
+use tokio::sync::Mutex;
 
 const COOKIE_NAME: &str = "tmux_web_session";
+
+#[derive(Clone)]
+pub struct LoginAttemptTracker {
+    error_count: usize,
+    black_file: Arc<PathBuf>,
+    state: Arc<Mutex<LoginAttemptState>>,
+}
+
+struct LoginAttemptState {
+    failures: HashMap<IpAddr, usize>,
+    blacklisted: HashSet<IpAddr>,
+}
+
+impl LoginAttemptTracker {
+    pub fn new(error_count: usize, black_file: PathBuf) -> Result<Self> {
+        if error_count == 0 {
+            return Err(anyhow!("--error-count must be greater than zero"));
+        }
+
+        Ok(Self {
+            error_count,
+            state: Arc::new(Mutex::new(LoginAttemptState {
+                failures: HashMap::new(),
+                blacklisted: load_blacklisted_hosts(&black_file)?,
+            })),
+            black_file: Arc::new(black_file),
+        })
+    }
+
+    pub fn error_count(&self) -> usize {
+        self.error_count
+    }
+
+    pub async fn is_blacklisted(&self, host: IpAddr) -> bool {
+        self.state.lock().await.blacklisted.contains(&host)
+    }
+
+    /// Records a failed token attempt and returns true when this attempt newly
+    /// blacklists the host.
+    pub async fn record_failure(&self, host: IpAddr) -> bool {
+        let mut state = self.state.lock().await;
+        if state.blacklisted.contains(&host) {
+            return false;
+        }
+
+        let failures = state.failures.entry(host).or_default();
+        *failures = failures.saturating_add(1);
+        if *failures < self.error_count {
+            return false;
+        }
+
+        state.failures.remove(&host);
+        state.blacklisted.insert(host);
+        if let Err(error) = append_blacklisted_host(&self.black_file, host) {
+            eprintln!(
+                "warning: failed to persist blacklisted host {host} to {}: {error:#}",
+                self.black_file.display()
+            );
+        }
+        true
+    }
+
+    pub async fn record_success(&self, host: IpAddr) {
+        self.state.lock().await.failures.remove(&host);
+    }
+}
+
+fn load_blacklisted_hosts(path: &PathBuf) -> Result<HashSet<IpAddr>> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("failed to create black file {}", path.display()))?;
+            String::new()
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read black file {}", path.display()));
+        }
+    };
+
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let host = line.trim();
+            (!host.is_empty() && !host.starts_with('#')).then_some((index + 1, host))
+        })
+        .map(|(line, host)| {
+            host.parse::<IpAddr>().with_context(|| {
+                format!(
+                    "invalid IP address on line {line} of black file {}",
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
+
+fn append_blacklisted_host(path: &PathBuf, host: IpAddr) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open black file {}", path.display()))?;
+    writeln!(file, "{host}")
+        .with_context(|| format!("failed to write black file {}", path.display()))?;
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -90,6 +211,8 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn issues_and_checks_cookie_sessions() {
@@ -124,5 +247,33 @@ mod tests {
     fn rejects_bad_tokens() {
         let auth = AuthState::new("secret".to_string(), false);
         assert!(auth.issue_session("wrong").is_none());
+    }
+
+    #[tokio::test]
+    async fn blacklists_a_host_after_the_configured_failure_count() {
+        let file = NamedTempFile::new().unwrap();
+        let tracker = LoginAttemptTracker::new(2, file.path().to_path_buf()).unwrap();
+        let host = "192.0.2.1".parse().unwrap();
+
+        assert!(!tracker.record_failure(host).await);
+        assert!(!tracker.is_blacklisted(host).await);
+        assert!(tracker.record_failure(host).await);
+        assert!(tracker.is_blacklisted(host).await);
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), "192.0.2.1\n");
+
+        let reloaded = LoginAttemptTracker::new(2, file.path().to_path_buf()).unwrap();
+        assert!(reloaded.is_blacklisted(host).await);
+    }
+
+    #[tokio::test]
+    async fn successful_login_resets_consecutive_failures() {
+        let file = NamedTempFile::new().unwrap();
+        let tracker = LoginAttemptTracker::new(2, file.path().to_path_buf()).unwrap();
+        let host = "192.0.2.1".parse().unwrap();
+
+        assert!(!tracker.record_failure(host).await);
+        tracker.record_success(host).await;
+        assert!(!tracker.record_failure(host).await);
+        assert!(!tracker.is_blacklisted(host).await);
     }
 }
