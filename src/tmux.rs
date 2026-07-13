@@ -152,7 +152,7 @@ impl TmuxConfig {
         command.arg("-u");
         command.arg("attach-session");
         command.arg("-t");
-        command.arg(session_name);
+        command.arg(session_target(session_name));
         command.env("TERM", "xterm-256color");
         command
     }
@@ -306,7 +306,7 @@ impl TmuxConfig {
             .command()
             .arg("list-windows")
             .arg("-t")
-            .arg(session_name)
+            .arg(session_target(session_name))
             .arg("-F")
             .arg(tmux_format(&[
                 "#{session_id}",
@@ -351,7 +351,7 @@ impl TmuxConfig {
             .arg("-F")
             .arg("#{window_id}")
             .arg("-t")
-            .arg(session_name);
+            .arg(session_target(session_name));
         if let Some(name) = &name {
             command.arg("-n").arg(name);
         }
@@ -468,7 +468,7 @@ impl TmuxConfig {
             .arg("display-message")
             .arg("-p")
             .arg("-t")
-            .arg(session_name)
+            .arg(session_target(session_name))
             .arg(tmux_format(&["#{window_id}", "#{window_zoomed_flag}"]))
             .output()
             .await
@@ -556,7 +556,7 @@ impl TmuxConfig {
             .arg("display-message")
             .arg("-p")
             .arg("-t")
-            .arg(session_name)
+            .arg(session_target(session_name))
             .arg(tmux_format(&[
                 "#{session_name}",
                 "#{session_id}",
@@ -641,7 +641,7 @@ impl TmuxConfig {
             .arg("resize-pane")
             .arg("-Z")
             .arg("-t")
-            .arg(session_name)
+            .arg(session_target(session_name))
             .output()
             .await
             .context("failed to execute tmux resize-pane")?;
@@ -755,7 +755,7 @@ impl TmuxConfig {
             .arg("display-message")
             .arg("-p")
             .arg("-t")
-            .arg(session_name)
+            .arg(session_target(session_name))
             .arg("#{session_id}")
             .output()
             .await
@@ -853,6 +853,10 @@ fn generated_session_name() -> String {
 
 fn tmux_format(fields: &[&str]) -> String {
     fields.join(TMUX_FIELD_SEPARATOR)
+}
+
+fn session_target(session_name: &str) -> String {
+    format!("{session_name}:")
 }
 
 fn parse_u32(value: Option<&str>) -> u32 {
@@ -1140,6 +1144,11 @@ mod tests {
             pane_active_border_style: None,
         };
         assert!(validate_pane_border_theme(&theme).is_err());
+    }
+
+    #[test]
+    fn qualifies_session_targets_to_avoid_window_name_collisions() {
+        assert_eq!(session_target("server"), "server:");
     }
 
     #[test]

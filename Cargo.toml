@@ -1,6 +1,6 @@
 [package]
 name = "tmux-web"
-version = "1.0.0"
+version = "1.0.3"
 edition = "2021"
 license = "ISC"
 description = "A small web gateway for remotely accessing tmux sessions."
