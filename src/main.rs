@@ -2,6 +2,7 @@ mod auth;
 mod pty;
 mod static_assets;
 mod tmux;
+mod updater;
 
 use anyhow::{anyhow, Context, Result};
 use auth::{AuthState, LoginAttemptTracker};
@@ -14,7 +15,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use pty::{ResponsiveLayoutRegistry, TerminalSize, TransferRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -29,7 +30,22 @@ use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    server: ServerArgs,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Update the installed executable to the latest stable release.
+    Update,
+}
+
+#[derive(ClapArgs, Debug)]
+struct ServerArgs {
     #[arg(
         long,
         visible_alias = "listen",
@@ -145,7 +161,12 @@ type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ApiError>)>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let cli = Cli::parse();
+    if matches!(cli.command, Some(Command::Update)) {
+        return updater::run();
+    }
+
+    let args = cli.server;
     let token = load_token(&args)?;
     let login_attempts = load_login_attempt_tracker(&args)?;
     let theme_config = load_theme_config(&args.theme)?;
@@ -210,7 +231,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_login_attempt_tracker(args: &Args) -> Result<Option<LoginAttemptTracker>> {
+fn load_login_attempt_tracker(args: &ServerArgs) -> Result<Option<LoginAttemptTracker>> {
     match (args.error_count, &args.black_file) {
         (0, None) => Ok(None),
         (0, Some(_)) => Err(anyhow!(
@@ -223,7 +244,7 @@ fn load_login_attempt_tracker(args: &Args) -> Result<Option<LoginAttemptTracker>
     }
 }
 
-fn load_token(args: &Args) -> Result<String> {
+fn load_token(args: &ServerArgs) -> Result<String> {
     if let Some(token) = &args.token {
         if token.trim().is_empty() {
             return Err(anyhow!("--token must not be empty"));
@@ -673,6 +694,16 @@ mod tests {
     use axum::http::HeaderValue;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn update_subcommand_parses_without_changing_server_invocation() {
+        let update = Cli::try_parse_from(["tmux-web", "update"]).unwrap();
+        assert!(matches!(update.command, Some(Command::Update)));
+
+        let server = Cli::try_parse_from(["tmux-web", "--port", "9000"]).unwrap();
+        assert!(server.command.is_none());
+        assert_eq!(server.server.port, 9000);
+    }
 
     #[test]
     fn missing_accept_encoding_allows_gzip() {

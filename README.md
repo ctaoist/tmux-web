@@ -49,6 +49,26 @@ cargo build --release
 ./target/release/tmux-web --host 127.0.0.1 --port 8082
 ```
 
+## Updating
+
+Update the installed executable to the latest stable GitHub release:
+
+```sh
+tmux-web update
+```
+
+The command detects the current executable path and Linux architecture, compares
+the version reported by `tmux-web -V` with the latest stable release tag,
+and downloads only when the latest semantic version is newer. It verifies the
+binary with the release SHA-256 file and atomically replaces the file on disk. It
+does not stop or restart a running service; restart the service afterward to use
+the new release. The user running the command must have write permission for the
+executable's directory.
+
+Release assets are uncompressed binaries. If you download one manually, verify
+its matching `.sha256` file and make it executable with `chmod +x` before running
+it.
+
 Press `Ctrl+g` to toggle command mode. In command mode:
 
 - `s` opens session commands.
