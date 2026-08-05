@@ -119,6 +119,7 @@ export function createTerminalController({
       terminalElement,
       getTerminal: () => runtime.terminal,
       getActiveSession: () => state.activeSession,
+      getActiveWindowId: () => state.activeWindowId,
       getCachedPanes,
       refreshPaneLayout,
       focusTerminal: focus,
@@ -879,20 +880,34 @@ export function createTerminalController({
     }, delay);
   }
 
-  async function refreshPaneLayout(sessionName = state.activeSession) {
-    if (!sessionName || sessionName !== state.activeSession || !state.activeWindowId) return [];
+  async function refreshPaneLayout(
+    sessionName = state.activeSession,
+    windowId = state.activeWindowId,
+  ) {
+    if (!sessionName || sessionName !== state.activeSession || !windowId || windowId !== state.activeWindowId) {
+      return [];
+    }
     try {
-      const panes = await listWindowPanes(state.activeWindowId, sessionName);
-      runtime.panesBySession.set(sessionName, panes);
+      const panes = await listWindowPanes(windowId, sessionName);
+      if (sessionName !== state.activeSession || windowId !== state.activeWindowId) return [];
+      let panesByWindow = runtime.panesBySession.get(sessionName);
+      if (!panesByWindow) {
+        panesByWindow = new Map();
+        runtime.panesBySession.set(sessionName, panesByWindow);
+      }
+      panesByWindow.set(windowId, panes);
       return panes;
     } catch (_) {
-      runtime.panesBySession.delete(sessionName);
+      runtime.panesBySession.get(sessionName)?.delete(windowId);
       return [];
     }
   }
 
-  function getCachedPanes(sessionName = state.activeSession) {
-    return runtime.panesBySession.get(sessionName) || [];
+  function getCachedPanes(
+    sessionName = state.activeSession,
+    windowId = state.activeWindowId,
+  ) {
+    return runtime.panesBySession.get(sessionName)?.get(windowId) || [];
   }
 
   function retainPaneCacheForSessions(sessionNames) {
