@@ -27,8 +27,13 @@ use std::{
 use tmux::{TmuxConfig, TmuxSession};
 use uuid::Uuid;
 
+const VERSION: &str = match option_env!("APP_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser, Debug)]
-#[command(author, version, about)]
+#[command(author, version = VERSION, about)]
 struct Args {
     #[arg(
         long,
@@ -671,8 +676,15 @@ fn internal_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use clap::CommandFactory;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn cli_version_uses_effective_build_version() {
+        let version = Args::command().render_version().to_string();
+        assert_eq!(version.trim(), format!("tmux-web {VERSION}"));
+    }
 
     #[test]
     fn missing_accept_encoding_allows_gzip() {

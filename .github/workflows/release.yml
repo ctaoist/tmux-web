@@ -30,6 +30,7 @@ permissions:
   contents: write
 
 env:
+  APP_VERSION: ${{ inputs.tag }}
   BIN_NAME: tmux-web
   CARGO_TERM_COLOR: always
 
@@ -74,7 +75,7 @@ jobs:
           tool: cross
 
       - name: Build static binary
-        run: cross build --release --locked --target ${{ matrix.target }}
+        run: cross build --release --locked --target ${{ matrix.target }} --config "env.APP_VERSION='${APP_VERSION}'"
 
       - name: Package binary
         run: |

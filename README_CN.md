@@ -46,6 +46,31 @@ cargo build --release
 ./target/release/tmux-web --host 127.0.0.1 --port 8082
 ```
 
+## 自动更新脚本
+
+[`scripts/auto-update.sh`](scripts/auto-update.sh) 可以由 cron 或 systemd timer 定期
+调用。脚本检查 GitHub 最新稳定版，仅在新版本更高时下载并校验现有 Release 的
+`.tar.gz` 产物，然后原子替换 tmux-web 二进制。除可选的重启命令外，它不会修改
+服务配置或其他文件。
+
+```sh
+TMUX_WEB_BINARY=/usr/local/bin/tmux-web \
+TMUX_WEB_RESTART_ENABLED=true \
+TMUX_WEB_RESTART_COMMAND='systemctl restart tmux-web' \
+./scripts/auto-update.sh
+```
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `TMUX_WEB_BINARY` | `PATH` 中的 `tmux-web` | 要检查和替换的二进制路径；符号链接会解析到目标文件。 |
+| `TMUX_WEB_RESTART_ENABLED` | `false` | 更新成功后是否执行重启命令；支持 `true/false`、`1/0`、`yes/no`、`on/off`。 |
+| `TMUX_WEB_RESTART_COMMAND` | 空 | 重启开关启用时必填，通过 `/bin/sh -c` 执行。 |
+
+脚本依赖 `curl`、`tar`、`sha256sum`、`awk`、GNU `sort` 和常用 coreutils。
+重启命令只在二进制确实被新版本替换后执行；检查失败、校验失败或无需更新时不会
+重启。Release workflow 会把运行时输入的 tag 通过 `APP_VERSION` 注入 Rust 编译，
+使 `tmux-web -V` 与发布版本一致；普通本地构建仍显示 `Cargo.toml` 中的版本。
+
 按 `Ctrl+g` 切换命令模式。在命令模式下：
 
 - `s` 打开 session 命令。

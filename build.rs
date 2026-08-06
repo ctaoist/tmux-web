@@ -6,6 +6,7 @@ use std::{
 };
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=APP_VERSION");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let dist_dir = manifest_dir.join("assets/dist");
     println!("cargo:rerun-if-changed={}", dist_dir.display());

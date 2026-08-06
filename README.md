@@ -49,6 +49,35 @@ cargo build --release
 ./target/release/tmux-web --host 127.0.0.1 --port 8082
 ```
 
+## Automatic Update Script
+
+[`scripts/auto-update.sh`](scripts/auto-update.sh) can be invoked periodically by
+cron or a systemd timer. It checks the latest stable GitHub release and, only
+when that version is newer, downloads and verifies the existing `.tar.gz`
+release asset before atomically replacing the tmux-web binary. Apart from the
+optional restart command, it does not modify service configuration or other
+files.
+
+```sh
+TMUX_WEB_BINARY=/usr/local/bin/tmux-web \
+TMUX_WEB_RESTART_ENABLED=true \
+TMUX_WEB_RESTART_COMMAND='systemctl restart tmux-web' \
+./scripts/auto-update.sh
+```
+
+| Environment | Default | Description |
+| --- | --- | --- |
+| `TMUX_WEB_BINARY` | `tmux-web` from `PATH` | Binary to check and replace; symlinks resolve to their target. |
+| `TMUX_WEB_RESTART_ENABLED` | `false` | Run the restart command after an update. Accepts `true/false`, `1/0`, `yes/no`, or `on/off`. |
+| `TMUX_WEB_RESTART_COMMAND` | empty | Required when restart is enabled and executed through `/bin/sh -c`. |
+
+The script requires `curl`, `tar`, `sha256sum`, `awk`, GNU `sort`, and common
+coreutils. The restart command runs only after the binary is actually replaced;
+it does not run when checking or verification fails, or when no update is
+available. The release workflow injects its input tag into the Rust build through
+`APP_VERSION`, so `tmux-web -V` matches the release version; ordinary local
+builds continue to report the version from `Cargo.toml`.
+
 Press `Ctrl+g` to toggle command mode. In command mode:
 
 - `s` opens session commands.

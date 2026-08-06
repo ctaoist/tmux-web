@@ -2,6 +2,7 @@ export function installTerminalSelectionCopy({
   terminalElement,
   getTerminal,
   getActiveSession,
+  getActiveWindowId,
   getCachedPanes,
   refreshPaneLayout,
   focusTerminal,
@@ -16,7 +17,8 @@ export function installTerminalSelectionCopy({
     (event) => {
       const terminal = getTerminal();
       const activeSession = getActiveSession();
-      if (event.button !== 0 || !terminal || !activeSession) {
+      const activeWindowId = getActiveWindowId();
+      if (event.button !== 0 || !terminal || !activeSession || !activeWindowId) {
         dragSelection = null;
         return;
       }
@@ -25,6 +27,7 @@ export function installTerminalSelectionCopy({
       terminal.clearSelection();
       dragSelection = {
         sessionName,
+        windowId: activeWindowId,
         startClientX: event.clientX,
         startClientY: event.clientY,
         startCell: eventToTerminalCell(event, terminalElement, terminal),
@@ -32,7 +35,7 @@ export function installTerminalSelectionCopy({
         endBufferCell: null,
         moved: false,
         columnMode: event.altKey && !isMacLike(),
-        panes: getCachedPanes(sessionName),
+        panes: getCachedPanes(sessionName, activeWindowId),
         layoutRequested: false,
       };
     },
@@ -50,8 +53,9 @@ export function installTerminalSelectionCopy({
       if (dragSelection.moved && !dragSelection.layoutRequested) {
         dragSelection.layoutRequested = true;
         const sessionName = dragSelection.sessionName;
-        void refreshPaneLayout(sessionName).then((panes) => {
-          if (dragSelection?.sessionName === sessionName) {
+        const windowId = dragSelection.windowId;
+        void refreshPaneLayout(sessionName, windowId).then((panes) => {
+          if (dragSelection?.sessionName === sessionName && dragSelection?.windowId === windowId) {
             dragSelection.panes = panes;
           }
         });
@@ -93,6 +97,7 @@ export function installTerminalSelectionCopy({
       copyPaneSelectionToClipboard(selection, {
         getTerminal,
         getActiveSession,
+        getActiveWindowId,
         getCachedPanes,
         focusTerminal,
       });
@@ -107,6 +112,7 @@ export function installTerminalSelectionCopy({
     copyPaneSelectionToClipboard(selection, {
       getTerminal,
       getActiveSession,
+      getActiveWindowId,
       getCachedPanes,
       focusTerminal,
     });
@@ -119,11 +125,12 @@ export function installTerminalSelectionCopy({
 function copyPaneSelectionToClipboard(selection, context) {
   const terminal = context.getTerminal();
   if (!terminal || context.getActiveSession() !== selection.sessionName) return;
+  if (context.getActiveWindowId() !== selection.windowId) return;
   if (!selection.startCell) return;
 
   const panes = selection.panes?.length
     ? selection.panes
-    : context.getCachedPanes(selection.sessionName);
+    : context.getCachedPanes(selection.sessionName, selection.windowId);
   const pane = panes.length
     ? findPaneContainingCell(selection.startCell, panes)
     : fallbackTerminalPane(terminal);
