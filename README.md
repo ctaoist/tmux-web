@@ -71,12 +71,13 @@ TMUX_WEB_RESTART_COMMAND='systemctl restart tmux-web' \
 | `TMUX_WEB_RESTART_ENABLED` | `false` | Run the restart command after an update. Accepts `true/false`, `1/0`, `yes/no`, or `on/off`. |
 | `TMUX_WEB_RESTART_COMMAND` | empty | Required when restart is enabled and executed through `/bin/sh -c`. |
 
-The script requires `curl`, `tar`, `sha256sum`, `awk`, GNU `sort`, and common
-coreutils. The restart command runs only after the binary is actually replaced;
-it does not run when checking or verification fails, or when no update is
-available. The release workflow injects its input tag into the Rust build through
-`APP_VERSION`, so `tmux-web -V` matches the release version; ordinary local
-builds continue to report the version from `Cargo.toml`.
+The script is compatible with OpenWrt BusyBox and requires `curl`, `tar`,
+`sha256sum`, `awk`, a `sort` implementation with `-V`, `stat`, and common BusyBox
+tools. The restart command runs only after the binary is actually replaced; it
+does not run when checking or verification fails, or when no update is available.
+The release workflow injects its input tag into the Rust build through
+`APP_VERSION`, so `tmux-web -V` matches the release version; ordinary local builds
+continue to report the version from `Cargo.toml`.
 
 Press `Ctrl+g` to toggle command mode. In command mode:
 

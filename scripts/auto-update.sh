@@ -52,7 +52,7 @@ fi
     "tmux-web was not found; set TMUX_WEB_BINARY to its path"
 
 for REQUIRED_COMMAND in awk chmod cp curl dirname mktemp mv readlink rm \
-    sha256sum sort tail tar uname; do
+    sha256sum sort stat tail tar uname; do
     command -v "$REQUIRED_COMMAND" >/dev/null 2>&1 || \
         die "$REQUIRED_COMMAND is required"
 done
@@ -60,6 +60,10 @@ done
 BINARY=$(readlink -f -- "$BINARY") || die "failed to resolve binary path"
 [ -f "$BINARY" ] || die "binary is not a regular file: $BINARY"
 [ -x "$BINARY" ] || die "binary is not executable: $BINARY"
+BINARY_MODE=$(stat -c '%a' "$BINARY") || die "failed to read binary permissions"
+case "$BINARY_MODE" in
+    '' | *[!0-7]*) die "invalid binary permissions: $BINARY_MODE" ;;
+esac
 
 VERSION_OUTPUT=$("$BINARY" -V 2>/dev/null) || die "failed to query current version"
 case "$VERSION_OUTPUT" in
@@ -136,7 +140,7 @@ tar -xzf "$ARCHIVE" -C "$WORK_DIR" "$ASSET" || \
 [ -f "$WORK_DIR/$ASSET" ] || die "release archive does not contain $ASSET"
 
 cp -- "$WORK_DIR/$ASSET" "$STAGED_BINARY" || die "failed to stage new binary"
-chmod --reference="$BINARY" "$STAGED_BINARY" || die "failed to preserve binary permissions"
+chmod "$BINARY_MODE" "$STAGED_BINARY" || die "failed to preserve binary permissions"
 mv -f -- "$STAGED_BINARY" "$BINARY" || die "failed to replace $BINARY"
 STAGED_BINARY=
 

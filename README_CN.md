@@ -66,10 +66,11 @@ TMUX_WEB_RESTART_COMMAND='systemctl restart tmux-web' \
 | `TMUX_WEB_RESTART_ENABLED` | `false` | 更新成功后是否执行重启命令；支持 `true/false`、`1/0`、`yes/no`、`on/off`。 |
 | `TMUX_WEB_RESTART_COMMAND` | 空 | 重启开关启用时必填，通过 `/bin/sh -c` 执行。 |
 
-脚本依赖 `curl`、`tar`、`sha256sum`、`awk`、GNU `sort` 和常用 coreutils。
-重启命令只在二进制确实被新版本替换后执行；检查失败、校验失败或无需更新时不会
-重启。Release workflow 会把运行时输入的 tag 通过 `APP_VERSION` 注入 Rust 编译，
-使 `tmux-web -V` 与发布版本一致；普通本地构建仍显示 `Cargo.toml` 中的版本。
+脚本兼容 OpenWrt BusyBox，依赖 `curl`、`tar`、`sha256sum`、`awk`、支持 `-V` 的
+`sort`、`stat` 和常用 BusyBox 工具。重启命令只在二进制确实被新版本替换后执行；
+检查失败、校验失败或无需更新时不会重启。Release workflow 会把运行时输入的 tag
+通过 `APP_VERSION` 注入 Rust 编译，使 `tmux-web -V` 与发布版本一致；普通本地构建
+仍显示 `Cargo.toml` 中的版本。
 
 按 `Ctrl+g` 切换命令模式。在命令模式下：
 
