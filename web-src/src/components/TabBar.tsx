@@ -1,55 +1,60 @@
-import { For } from "solid-js";
+import { For, Show } from "solid-js";
 
 export default function TabBar(props) {
   return (
-    <header class="nav-bars">
-      <section class="sessionbar">
-        <div class="session-select-wrap">
-          <select
-            class="session-select"
-            value={props.state.activeSession}
-            onChange={(event) => void props.actions.setActiveSession(event.currentTarget.value)}
-          >
-            <For each={props.state.sessions}>
-              {(session) => (
-                <option value={session.name}>
-                  {session.name} ({session.windows}w)
-                </option>
-              )}
-            </For>
-          </select>
-        </div>
-        <div class="tab-actions">
-          <button
-            type="button"
-            class="icon-button"
-            title="Refresh sessions"
-            aria-label="Refresh sessions"
-            onClick={() => void props.actions.refreshSessions()}
-          >
-            R
-          </button>
-          <button
-            type="button"
-            class="icon-button"
-            title="New session"
-            aria-label="New session"
-            onClick={() => void props.actions.createSession()}
-          >
-            +
-          </button>
-          <button
-            type="button"
-            class="icon-button danger-button"
-            title="Kill session"
-            aria-label="Kill session"
-            disabled={!props.state.activeSession}
-            onClick={() => void props.actions.killSession(props.state.activeSession)}
-          >
-            x
-          </button>
-        </div>
-      </section>
+    <header
+      class="nav-bars"
+      classList={{ "session-bar-hidden": props.state.hideSessionBar }}
+    >
+      <Show when={!props.state.hideSessionBar}>
+        <section class="sessionbar">
+          <div class="session-select-wrap">
+            <select
+              class="session-select"
+              value={props.state.activeSession}
+              onChange={(event) => void props.actions.setActiveSession(event.currentTarget.value)}
+            >
+              <For each={props.state.sessions}>
+                {(session) => (
+                  <option value={session.name}>
+                    {session.name} ({session.windows}w)
+                  </option>
+                )}
+              </For>
+            </select>
+          </div>
+          <div class="tab-actions">
+            <button
+              type="button"
+              class="icon-button"
+              title="Refresh sessions"
+              aria-label="Refresh sessions"
+              onClick={() => void props.actions.refreshSessions()}
+            >
+              R
+            </button>
+            <button
+              type="button"
+              class="icon-button"
+              title="New session"
+              aria-label="New session"
+              onClick={() => void props.actions.createSession()}
+            >
+              +
+            </button>
+            <button
+              type="button"
+              class="icon-button danger-button"
+              title="Kill session"
+              aria-label="Kill session"
+              disabled={!props.state.activeSession}
+              onClick={() => void props.actions.killSession(props.state.activeSession)}
+            >
+              x
+            </button>
+          </div>
+        </section>
+      </Show>
       <section class="tabbar">
         <div class="tabs">
           <For each={props.state.windows}>

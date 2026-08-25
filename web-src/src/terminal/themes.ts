@@ -9,6 +9,7 @@ export type TmuxTheme = {
 };
 export type ThemeConfig = {
   theme?: string;
+  hide_session_bar?: boolean;
   [name: string]: unknown;
 };
 

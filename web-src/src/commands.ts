@@ -25,8 +25,9 @@ export const UNLOCKED_COMMAND_ITEMS: CommandItem[] = [
 export const COMMAND_MENUS = {
   session: {
     label: "Session",
-    subtitle: "Manage the tmux session selected above the window tabs.",
+    subtitle: "Manage and switch tmux sessions.",
     actions: [
+      { id: "session-list", key: "l", label: "List sessions", detail: "View and switch tmux sessions" },
       { id: "session-new", key: "n", label: "New session", detail: "Create a tmux session" },
       { id: "session-rename", key: "r", label: "Rename session", detail: "Rename the active tmux session" },
       { id: "session-kill", key: "x", label: "Kill session", detail: "Close the active tmux session", danger: true },

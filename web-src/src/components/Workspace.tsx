@@ -12,6 +12,7 @@ export default function Workspace(props) {
       classList={{
         "sticky-keys-open": props.state.stickyKeysVisible,
         "command-bar-locked": props.state.mode === "locked",
+        "session-bar-hidden": props.state.hideSessionBar,
       }}
     >
       <TabBar state={props.state} actions={props.actions} />

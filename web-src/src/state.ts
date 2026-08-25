@@ -11,6 +11,8 @@ export function createInitialState() {
     sessions: [],
     activeSession: "",
     activeSessionId: "",
+    hideSessionBar: false,
+    sessionListVisible: false,
     windows: [],
     activeWindowId: "",
     paneListVisible: false,

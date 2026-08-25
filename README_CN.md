@@ -97,6 +97,7 @@ TMUX_WEB_HOST=0.0.0.0 TMUX_WEB_PORT=8082 TMUX_WEB_THEME=light cargo run
 | `--host` | `TMUX_WEB_HOST` | `127.0.0.1` | HTTP 绑定地址，别名 `--listen`。 |
 | `--port` | `TMUX_WEB_PORT` | `8082` | HTTP 端口。 |
 | `--theme` | `TMUX_WEB_THEME` | `auto` | `auto`、`dark`、`light`，或一个 JSON 主题文件路径。 |
+| `--hide-session-bar` | `TMUX_WEB_HIDE_SESSION_BAR` | `false` | 隐藏 window 标签上方的 session 栏；仍可从底部 Session 子菜单查看和切换 session。 |
 | `--tmux` | | `tmux` | tmux 可执行文件路径。 |
 | `--socket-path` | | | 传给 `tmux -S` 的 tmux socket 路径。 |
 | `--token` | `TMUX_WEB_TOKEN` | 自动生成 | 登录 token。省略时，tmux-web 会在启动时打印一个新 token。 |

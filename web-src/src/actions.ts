@@ -31,6 +31,7 @@ export function createActions({ state, setState, getTerminal }) {
       connectionStatus: "idle",
       connectionMessage: "",
       connectionTransient: false,
+      sessionListVisible: false,
     });
     getTerminal()?.close({ disposeTerminal: true, intentional: true });
   }
@@ -55,6 +56,7 @@ export function createActions({ state, setState, getTerminal }) {
     setState({
       themeConfig,
       themePreference: normalizeThemePreference(themeConfig),
+      hideSessionBar: themeConfig.hide_session_bar === true,
     });
   }
 
@@ -400,7 +402,11 @@ export function createActions({ state, setState, getTerminal }) {
     const key = event.key;
     const lowered = key.toLowerCase();
     if (key === "Escape" || lowered === "q") {
-      closeCommandMenu();
+      if (state.activeMenu === "session" && state.sessionListVisible) {
+        closeSessionList();
+      } else {
+        closeCommandMenu();
+      }
       return;
     }
     if (!state.activeMenu) {
@@ -442,26 +448,42 @@ export function createActions({ state, setState, getTerminal }) {
       mode: state.mode === "locked" ? "unlocked" : "locked",
       activeMenu: null,
       paneListVisible: false,
+      sessionListVisible: false,
     });
     getTerminal()?.focus();
   }
 
   function lockCommandMode() {
-    setState({ mode: "locked", activeMenu: null });
+    setState({ mode: "locked", activeMenu: null, sessionListVisible: false });
     getTerminal()?.focus();
   }
 
   function openCommandMenu(menu) {
-    setState({ activeMenu: menu, paneListVisible: false });
+    setState({ activeMenu: menu, paneListVisible: false, sessionListVisible: false });
     getTerminal()?.focus();
   }
 
   function closeCommandMenu() {
-    setState("activeMenu", null);
+    setState({ activeMenu: null, sessionListVisible: false });
     getTerminal()?.focus();
   }
 
+  function openSessionList() {
+    setState("sessionListVisible", true);
+  }
+
+  function closeSessionList() {
+    setState("sessionListVisible", false);
+    getTerminal()?.focus();
+  }
+
+  async function selectSessionFromList(name) {
+    await setActiveSession(name);
+    lockCommandMode();
+  }
+
   async function executeMenuAction(command) {
+    if (command === "session-list") return openSessionList();
     if (command === "session-new") await createSession();
     else if (command === "session-rename") await renameActiveSession();
     else if (command === "session-kill") await killSession();
@@ -517,6 +539,7 @@ export function createActions({ state, setState, getTerminal }) {
     bootstrap,
     closeCommandMenu,
     closePaneList,
+    closeSessionList,
     createSession,
     createWindow,
     dispose,
@@ -535,6 +558,7 @@ export function createActions({ state, setState, getTerminal }) {
     refreshWindows,
     runTopLevelCommand,
     selectPane,
+    selectSessionFromList,
     setActiveSession,
     setActiveWindow,
     toggleStickyKeys,

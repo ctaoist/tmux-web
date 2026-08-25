@@ -108,6 +108,7 @@ TMUX_WEB_HOST=0.0.0.0 TMUX_WEB_PORT=8082 TMUX_WEB_THEME=light cargo run
 | `--host` | `TMUX_WEB_HOST` | `127.0.0.1` | HTTP bind address, with `--listen` as an alias. |
 | `--port` | `TMUX_WEB_PORT` | `8082` | HTTP port. |
 | `--theme` | `TMUX_WEB_THEME` | `auto` | `auto`, `dark`, `light`, or a JSON theme file path. |
+| `--hide-session-bar` | `TMUX_WEB_HIDE_SESSION_BAR` | `false` | Hide the session bar above the window tabs. Sessions remain available from the bottom Session menu. |
 | `--tmux` | | `tmux` | Path to the tmux executable. |
 | `--socket-path` | | | tmux socket path passed to `tmux -S`. |
 | `--token` | `TMUX_WEB_TOKEN` | generated | Login token. If omitted, tmux-web prints a new startup token. |

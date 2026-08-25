@@ -51,6 +51,9 @@ struct Args {
     #[arg(long, env = "TMUX_WEB_THEME", default_value = "auto")]
     theme: String,
 
+    #[arg(long, env = "TMUX_WEB_HIDE_SESSION_BAR", default_value_t = false)]
+    hide_session_bar: bool,
+
     #[arg(long, default_value = "tmux")]
     tmux: PathBuf,
 
@@ -93,6 +96,7 @@ struct AppState {
     transfers: TransferRegistry,
     responsive_layouts: ResponsiveLayoutRegistry,
     theme_config: ThemeConfig,
+    hide_session_bar: bool,
     static_dir: Option<PathBuf>,
 }
 
@@ -171,6 +175,7 @@ async fn main() -> Result<()> {
         transfers: TransferRegistry::default(),
         responsive_layouts: ResponsiveLayoutRegistry::default(),
         theme_config,
+        hide_session_bar: args.hide_session_bar,
         static_dir: args.static_dir.clone(),
     };
 
@@ -381,7 +386,18 @@ async fn me(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Json<MeRe
 }
 
 async fn config(State(state): State<Arc<AppState>>) -> Json<ThemeConfig> {
-    Json(state.theme_config.clone())
+    Json(frontend_config(&state.theme_config, state.hide_session_bar))
+}
+
+fn frontend_config(theme_config: &ThemeConfig, hide_session_bar: bool) -> ThemeConfig {
+    let mut config = theme_config.clone();
+    if let Some(object) = config.as_object_mut() {
+        object.insert(
+            "hide_session_bar".to_string(),
+            Value::Bool(hide_session_bar),
+        );
+    }
+    config
 }
 
 async fn list_sessions(
@@ -772,6 +788,24 @@ mod tests {
             let config = load_theme_config(theme).expect("builtin theme should load");
             assert_eq!(config.get("theme").and_then(Value::as_str), Some(theme));
         }
+    }
+
+    #[test]
+    fn frontend_config_includes_session_bar_preference() {
+        let theme = builtin_theme_config("dark");
+        let visible = frontend_config(&theme, false);
+        let hidden = frontend_config(&theme, true);
+
+        assert_eq!(visible.get("hide_session_bar"), Some(&Value::Bool(false)));
+        assert_eq!(hidden.get("hide_session_bar"), Some(&Value::Bool(true)));
+        assert_eq!(hidden.get("theme").and_then(Value::as_str), Some("dark"));
+    }
+
+    #[test]
+    fn parses_hide_session_bar_flag() {
+        let args = Args::try_parse_from(["tmux-web", "--hide-session-bar"])
+            .expect("hide session bar flag should parse");
+        assert!(args.hide_session_bar);
     }
 
     #[test]
