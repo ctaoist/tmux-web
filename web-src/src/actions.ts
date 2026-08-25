@@ -13,11 +13,18 @@ function isThemeConfig(value: unknown): value is ThemeConfig {
 }
 
 export function createActions({ state, setState, getTerminal }) {
+  const tmuxEvents = {
+    socket: null,
+    reconnectTimer: 0,
+    reconnectDelay: 500,
+    generation: 0,
+  };
   const authorizedApi = (path: string, options: RequestInit = {}) => (
     api(path, options, handleAuthExpired)
   );
 
   function handleAuthExpired() {
+    stopTmuxEvents();
     setState({
       authenticated: false,
       reconnectPending: false,
@@ -34,6 +41,7 @@ export function createActions({ state, setState, getTerminal }) {
     setState({ authenticated: Boolean(me.authenticated), bootError: "" });
     if (me.authenticated) {
       await refreshSessions();
+      startTmuxEvents();
     }
   }
 
@@ -57,6 +65,7 @@ export function createActions({ state, setState, getTerminal }) {
     });
     setState({ authenticated: true, bootError: "" });
     await refreshSessions();
+    startTmuxEvents();
   }
 
   async function refreshSessions({ refreshWindows: shouldRefreshWindows = true } = {}) {
@@ -65,15 +74,15 @@ export function createActions({ state, setState, getTerminal }) {
     const sessionNames = new Set(sessions.map((session) => session.name));
     getTerminal()?.retainPaneCacheForSessions(sessionNames);
 
-    let activeSession = state.activeSession;
-    if (!activeSession && sessions.length) {
-      activeSession = sessions[0].name;
-    }
-    if (activeSession && !sessions.some((session) => session.name === activeSession)) {
-      activeSession = sessions[0]?.name || "";
-    }
+    const currentSession = state.sessions.find((session) => session.name === state.activeSession);
+    const currentSessionId = state.activeSessionId || currentSession?.id || "";
+    const active = sessions.find((session) => session.id === currentSessionId)
+      || sessions.find((session) => session.name === state.activeSession)
+      || sessions[0];
+    const activeSession = active?.name || "";
+    const activeSessionId = active?.id || "";
 
-    setState({ sessions, activeSession });
+    setState({ sessions, activeSession, activeSessionId });
     if (shouldRefreshWindows) {
       await refreshWindows(activeSession);
     }
@@ -159,7 +168,7 @@ export function createActions({ state, setState, getTerminal }) {
     getTerminal()?.dropPaneCache(name);
     if (state.activeSession === name) {
       getTerminal()?.close({ disposeTerminal: true, intentional: true });
-      setState({ activeSession: "", activeWindowId: "", windows: [] });
+      setState({ activeSession: "", activeSessionId: "", activeWindowId: "", windows: [] });
     }
     await refreshSessions();
   }
@@ -193,8 +202,110 @@ export function createActions({ state, setState, getTerminal }) {
 
   async function setActiveSession(name) {
     if (state.activeSession === name) return;
-    setState({ activeSession: name, activeMenu: null, windows: [], activeWindowId: "" });
+    const activeSessionId = state.sessions.find((session) => session.name === name)?.id || "";
+    setState({ activeSession: name, activeSessionId, activeMenu: null, windows: [], activeWindowId: "" });
     await refreshWindows(name);
+  }
+
+  function startTmuxEvents() {
+    if (!state.authenticated) return;
+    if (tmuxEvents.socket
+      && (tmuxEvents.socket.readyState === WebSocket.OPEN
+        || tmuxEvents.socket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    clearTimeout(tmuxEvents.reconnectTimer);
+    tmuxEvents.reconnectTimer = 0;
+    const generation = tmuxEvents.generation;
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    const socket = new WebSocket(`${protocol}://${location.host}/ws/events`);
+    tmuxEvents.socket = socket;
+
+    socket.addEventListener("open", () => {
+      if (socket !== tmuxEvents.socket || generation !== tmuxEvents.generation) return;
+      tmuxEvents.reconnectDelay = 500;
+    });
+
+    socket.addEventListener("message", (event) => {
+      if (socket !== tmuxEvents.socket || generation !== tmuxEvents.generation) return;
+      if (typeof event.data !== "string") return;
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (_) {
+        return;
+      }
+      if (message?.type === "tmux_state") {
+        applyTmuxState(message);
+      }
+    });
+
+    socket.addEventListener("close", () => {
+      if (socket !== tmuxEvents.socket || generation !== tmuxEvents.generation) return;
+      tmuxEvents.socket = null;
+      if (!state.authenticated) return;
+      const delay = tmuxEvents.reconnectDelay;
+      tmuxEvents.reconnectDelay = Math.min(delay * 2, 10000);
+      tmuxEvents.reconnectTimer = window.setTimeout(startTmuxEvents, delay);
+    });
+  }
+
+  function stopTmuxEvents() {
+    tmuxEvents.generation += 1;
+    clearTimeout(tmuxEvents.reconnectTimer);
+    tmuxEvents.reconnectTimer = 0;
+    const socket = tmuxEvents.socket;
+    tmuxEvents.socket = null;
+    socket?.close();
+    tmuxEvents.reconnectDelay = 500;
+  }
+
+  function applyTmuxState(message) {
+    if (!Array.isArray(message.sessions) || !message.windows || typeof message.windows !== "object") {
+      return;
+    }
+
+    const sessions = message.sessions;
+    const previousActiveSession = state.activeSession;
+    const previous = state.sessions.find((session) => session.name === previousActiveSession);
+    const previousId = state.activeSessionId || previous?.id || "";
+    const active = sessions.find((session) => session.id === previousId)
+      || sessions.find((session) => session.name === previousActiveSession)
+      || sessions[0];
+    const activeSession = active?.name || "";
+    const activeSessionId = active?.id || "";
+    const windows = activeSessionId && Array.isArray(message.windows[activeSessionId])
+      ? message.windows[activeSessionId]
+      : [];
+    const activeWindowId = windows.find((window) => window.active)?.id
+      || windows.find((window) => window.id === state.activeWindowId)?.id
+      || windows[0]?.id
+      || "";
+
+    const sessionNames = new Set(sessions.map((session) => session.name));
+    getTerminal()?.retainPaneCacheForSessions(sessionNames);
+    if (previousActiveSession && previousActiveSession !== activeSession) {
+      getTerminal()?.dropPaneCache(previousActiveSession);
+    }
+    const contextChanged = previousActiveSession !== activeSession
+      || state.activeWindowId !== activeWindowId;
+    setState({
+      sessions,
+      activeSession,
+      activeSessionId,
+      windows,
+      activeWindowId,
+      ...(contextChanged ? {
+        paneListVisible: false,
+        paneListLoading: false,
+        paneListPanes: [],
+      } : {}),
+    });
+  }
+
+  function dispose() {
+    stopTmuxEvents();
   }
 
   async function setActiveWindow(windowId) {
@@ -408,6 +519,7 @@ export function createActions({ state, setState, getTerminal }) {
     closePaneList,
     createSession,
     createWindow,
+    dispose,
     executeMenuAction,
     handleAuthExpired,
     handleGlobalKeyEvent,

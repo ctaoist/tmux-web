@@ -1,4 +1,5 @@
 mod auth;
+mod events;
 mod pty;
 mod static_assets;
 mod tmux;
@@ -15,6 +16,7 @@ use axum::{
     Json, Router,
 };
 use clap::Parser;
+use events::TmuxEventHub;
 use pty::{ResponsiveLayoutRegistry, TerminalSize, TransferRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,6 +89,7 @@ struct AppState {
     auth: AuthState,
     login_attempts: Option<LoginAttemptTracker>,
     tmux: TmuxConfig,
+    tmux_events: TmuxEventHub,
     transfers: TransferRegistry,
     responsive_layouts: ResponsiveLayoutRegistry,
     theme_config: ThemeConfig,
@@ -159,10 +162,12 @@ async fn main() -> Result<()> {
         .and_then(Value::as_str)
         .unwrap_or("auto")
         .to_string();
+    let tmux = TmuxConfig::new(args.tmux.clone(), args.socket_path.clone());
     let state = AppState {
         auth: AuthState::new(token.clone(), false),
         login_attempts,
-        tmux: TmuxConfig::new(args.tmux.clone(), args.socket_path.clone()),
+        tmux_events: TmuxEventHub::new(tmux.clone()),
+        tmux,
         transfers: TransferRegistry::default(),
         responsive_layouts: ResponsiveLayoutRegistry::default(),
         theme_config,
@@ -180,6 +185,7 @@ async fn main() -> Result<()> {
             "/api/sessions/{name}",
             delete(kill_session).put(rename_session),
         )
+        .route("/ws/events", get(tmux_events_ws))
         .route("/ws/terminal", get(terminal_ws))
         .route("/ws/trzsz", get(trzsz_ws))
         .fallback(static_response)
@@ -456,6 +462,17 @@ async fn terminal_ws(
             query.transfer_id,
         )
     })
+}
+
+async fn tmux_events_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if require_auth(&headers, &state).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    ws.on_upgrade(move |socket| events::run_tmux_events(socket, state.tmux_events.clone()))
 }
 
 async fn trzsz_ws(

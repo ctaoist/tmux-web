@@ -8,6 +8,7 @@
 
 - 创建、重命名、切换、刷新和关闭 tmux session。
 - 以标签页形式查看 tmux window，创建、关闭、切换 window。
+- 通过 WebSocket 实时同步 session 和 window 更新，包括重命名与退出。
 - 分割、切换、缩放 Pane、轮换布局，移动端有 `Panes List` 方便切换。
 - 为移动端提供粘滞按键：`Esc`、`Tab`、`Ctrl`、`Alt`、`Shift`、`Enter`
   和方向键。

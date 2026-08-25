@@ -10,6 +10,7 @@ paid to the mobile experience.
 
 - Create, rename, switch, refresh, and kill tmux sessions.
 - View tmux windows as tabs, and create, close, and switch windows.
+- Receive live session and window updates over WebSocket, including renames and exits.
 - Split, switch, and zoom panes, cycle layouts, and use `Panes List` on mobile
   for convenient pane switching.
 - Use mobile-friendly sticky keys for `Esc`, `Tab`, `Ctrl`, `Alt`, `Shift`,

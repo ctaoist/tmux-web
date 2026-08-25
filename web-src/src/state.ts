@@ -10,6 +10,7 @@ export function createInitialState() {
     bootError: "",
     sessions: [],
     activeSession: "",
+    activeSessionId: "",
     windows: [],
     activeWindowId: "",
     paneListVisible: false,

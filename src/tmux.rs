@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -25,8 +25,9 @@ pub struct TmuxConfig {
     responsive_zoom_windows: Arc<Mutex<HashMap<String, DesktopLayoutSnapshot>>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TmuxSession {
+    pub id: String,
     pub name: String,
     pub windows: u32,
     pub attached: u32,
@@ -44,7 +45,7 @@ pub struct TmuxPane {
     pub active: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TmuxWindow {
     pub id: String,
     pub index: u32,
@@ -52,6 +53,12 @@ pub struct TmuxWindow {
     pub active: bool,
     pub panes: u32,
     pub zoomed: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TmuxStateSnapshot {
+    pub sessions: Vec<TmuxSession>,
+    pub windows: BTreeMap<String, Vec<TmuxWindow>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -163,6 +170,7 @@ impl TmuxConfig {
             .arg("list-sessions")
             .arg("-F")
             .arg(tmux_format(&[
+                "#{session_id}",
                 "#{session_name}",
                 "#{session_windows}",
                 "#{session_attached}",
@@ -187,6 +195,27 @@ impl TmuxConfig {
             .filter(|line| !line.is_empty())
             .map(parse_session_line)
             .collect()
+    }
+
+    pub async fn state_snapshot(&self) -> Result<TmuxStateSnapshot> {
+        let sessions = self.list_sessions().await?;
+        let mut windows = sessions
+            .iter()
+            .map(|session| (session.id.clone(), Vec::new()))
+            .collect::<BTreeMap<_, _>>();
+
+        if !sessions.is_empty() {
+            for entry in self.list_all_window_entries().await? {
+                if let Some(session_windows) = windows.get_mut(&entry.session_id) {
+                    session_windows.push(entry.window);
+                }
+            }
+            for session_windows in windows.values_mut() {
+                session_windows.sort_by_key(|window| window.index);
+            }
+        }
+
+        Ok(TmuxStateSnapshot { sessions, windows })
     }
 
     pub async fn list_panes_for_window(
@@ -321,6 +350,38 @@ impl TmuxConfig {
             .await
             .context("failed to execute tmux list-windows")?;
         ensure_success(output.status.success(), &output.stderr, "tmux list-windows")?;
+
+        let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
+        stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(parse_window_entry_line)
+            .collect()
+    }
+
+    async fn list_all_window_entries(&self) -> Result<Vec<TmuxWindowEntry>> {
+        let output = self
+            .command()
+            .arg("list-windows")
+            .arg("-a")
+            .arg("-F")
+            .arg(tmux_format(&[
+                "#{session_id}",
+                "#{window_id}",
+                "#{window_index}",
+                "#{window_active}",
+                "#{window_panes}",
+                "#{window_zoomed_flag}",
+                "#{window_name}",
+            ]))
+            .output()
+            .await
+            .context("failed to execute tmux list-windows -a")?;
+        ensure_success(
+            output.status.success(),
+            &output.stderr,
+            "tmux list-windows -a",
+        )?;
 
         let stdout = String::from_utf8(output.stdout).context("tmux output was not UTF-8")?;
         stdout
@@ -884,7 +945,8 @@ fn parse_u16(value: Option<&str>) -> u16 {
 }
 
 fn parse_session_line(line: &str) -> Result<TmuxSession> {
-    let mut parts = line.splitn(5, TMUX_FIELD_SEPARATOR);
+    let mut parts = line.splitn(6, TMUX_FIELD_SEPARATOR);
+    let id = required_part(&mut parts, "session_id")?;
     let name = required_part(&mut parts, "session_name")?;
     let windows = parse_required_u32(&required_part(&mut parts, "session_windows")?)?;
     let attached = parse_required_u32(&required_part(&mut parts, "session_attached")?)?;
@@ -892,6 +954,7 @@ fn parse_session_line(line: &str) -> Result<TmuxSession> {
     let last_attached = parse_u64(parts.next());
 
     Ok(TmuxSession {
+        id,
         name,
         windows,
         attached,
@@ -1095,9 +1158,10 @@ mod tests {
 
     #[test]
     fn parses_tmux_session_format() {
-        let output = tmux_format(&["cnm", "1", "0", "1783301478", ""]);
+        let output = tmux_format(&["$1", "cnm", "1", "0", "1783301478", ""]);
         let session = parse_session_line(&output).expect("session should parse");
 
+        assert_eq!(session.id, "$1");
         assert_eq!(session.name, "cnm");
         assert_eq!(session.windows, 1);
         assert_eq!(session.attached, 0);

@@ -75,6 +75,7 @@ export default function App() {
     window.removeEventListener("pointerdown", terminal.notePointerActivation, true);
     window.removeEventListener("focus", terminal.handlePageActivation);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
+    actions.dispose();
     terminal.close({ disposeTerminal: true, intentional: true });
   });
 
